@@ -113,7 +113,19 @@ fn draw_column(
         .iter()
         .map(|row| {
             let task = column.task(&row.task_id);
-            ListItem::new(row_line(task, row, inner.width as usize, today))
+            let mut lines = row_lines(task, row, inner.width as usize, today);
+            // Ratatui skips items taller than the viewport entirely.
+            if lines.len() > inner.height as usize {
+                lines.truncate(inner.height as usize);
+                if inner.height > 1 {
+                    let last = lines.last_mut().unwrap();
+                    *last = Line::styled(
+                        fit("… (more in editor)", inner.width as usize),
+                        last.spans[0].style,
+                    );
+                }
+            }
+            ListItem::new(lines)
         })
         .collect();
     let highlight = if focused {
@@ -126,9 +138,9 @@ fn draw_column(
     frame.render_stateful_widget(list, inner, &mut column.list_state);
 }
 
-fn row_line(task: Option<&Task>, row: &Row, width: usize, today: NaiveDate) -> Line<'static> {
+fn row_lines(task: Option<&Task>, row: &Row, width: usize, today: NaiveDate) -> Vec<Line<'static>> {
     let Some(task) = task else {
-        return Line::from(fit("?", width));
+        return vec![Line::from(fit("?", width))];
     };
     let indent = if row.depth > 0 { "  └ " } else { "" };
     let date = dates::due_date(task.due.as_deref())
@@ -148,12 +160,207 @@ fn row_line(task: Option<&Task>, row: &Row, width: usize, today: NaiveDate) -> L
     if row.ghost {
         style = style.add_modifier(Modifier::DIM);
     }
-    let mut spans = vec![Span::styled(
-        format!("{indent}{}", fit(&task.title, title_width)),
-        style,
-    )];
-    if !date.is_empty() {
-        spans.push(Span::styled(format!(" {date}"), style));
+    textwrap::wrap(&task.title, title_width.max(1))
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let prefix = if index == 0 {
+                indent.to_string()
+            } else {
+                " ".repeat(indent.width())
+            };
+            let mut spans = vec![Span::styled(
+                format!("{prefix}{}", fit(&text, title_width)),
+                style,
+            )];
+            if index == 0 && !date.is_empty() {
+                spans.push(Span::styled(format!(" {date}"), style));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::widgets::ListState;
+
+    use crate::model::TaskList;
+    fn column(tasks: Vec<Task>) -> Column {
+        let mut column = Column {
+            list: TaskList {
+                id: "list".into(),
+                title: "Inbox".into(),
+            },
+            tasks,
+            rows: Vec::new(),
+            selected: None,
+            last_index: 0,
+            list_state: ListState::default(),
+            pinned: None,
+            loading: false,
+            error: None,
+        };
+        column.rebuild_rows(false);
+        column
     }
-    Line::from(spans)
+
+    fn render(terminal: &mut Terminal<TestBackend>, column: &mut Column) {
+        terminal
+            .draw(|frame| {
+                draw_column(
+                    frame,
+                    frame.area(),
+                    column,
+                    true,
+                    NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(),
+                    (false, false),
+                );
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn long_task_description_wraps_inside_column() {
+        let description = concat!(
+            "Review the quarterly planning document and send feedback before Friday, ",
+            "including the budget assumptions, staffing requirements, project milestones, ",
+            "delivery risks, and follow-up actions for every team involved."
+        );
+        let mut task = Task::new_local("long".into(), description.into(), None);
+        task.due = Some("2026-10-08T00:00:00.000Z".into());
+        task.position = "000".into();
+        let mut next = Task::new_local("next".into(), "Next task".into(), None);
+        next.position = "001".into();
+        let mut column = column(vec![task, next]);
+        let mut terminal = Terminal::new(TestBackend::new(28, 24)).unwrap();
+        render(&mut terminal, &mut column);
+
+        let buffer = terminal.backend().buffer();
+        let contents: Vec<String> = (1..23)
+            .map(|y| {
+                (1..27)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(contents[0], "Review the quarterly 10-08");
+        let next_row = contents
+            .iter()
+            .position(|line| line == "Next task")
+            .unwrap();
+        assert!(next_row >= 10, "expected at least ten wrapped lines");
+        let rendered = contents[..next_row].join(" ").replace(" 10-08", "");
+        assert_eq!(
+            rendered.split_whitespace().collect::<Vec<_>>(),
+            description.split_whitespace().collect::<Vec<_>>()
+        );
+        for y in 1..23 {
+            assert_eq!(buffer[(0, y)].symbol(), "│");
+            assert_eq!(buffer[(27, y)].symbol(), "│");
+        }
+        for y in 1..=next_row as u16 {
+            assert!(buffer[(1, y)].modifier.contains(Modifier::REVERSED));
+        }
+        assert!(
+            !buffer[(1, next_row as u16 + 1)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+
+        column.selected = Some("next".into());
+        terminal.backend_mut().resize(28, 6);
+        render(&mut terminal, &mut column);
+        assert_eq!(column.list_state.offset(), 1);
+        let buffer = terminal.backend().buffer();
+        let selected: String = (1..27).map(|x| buffer[(x, 1)].symbol()).collect();
+        assert_eq!(selected.trim_end(), "Next task");
+        assert!(buffer[(1, 1)].modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn description_taller_than_viewport_stays_visible() {
+        let task = Task::new_local(
+            "long".into(),
+            "Review the quarterly planning document and send feedback before Friday. ".repeat(20),
+            None,
+        );
+        let mut column = column(vec![task]);
+        let mut terminal = Terminal::new(TestBackend::new(28, 6)).unwrap();
+        render(&mut terminal, &mut column);
+
+        let buffer = terminal.backend().buffer();
+        let first: String = (1..27).map(|x| buffer[(x, 1)].symbol()).collect();
+        let last: String = (1..27).map(|x| buffer[(x, 4)].symbol()).collect();
+        assert_eq!(first.trim_end(), "Review the quarterly");
+        assert_eq!(last.trim_end(), "… (more in editor)");
+        assert!(buffer[(1, 1)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(buffer[(0, 4)].symbol(), "│");
+        assert_eq!(buffer[(27, 4)].symbol(), "│");
+    }
+
+    #[test]
+    fn wraps_unicode_and_unbroken_words_without_losing_text() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
+        let row = Row {
+            task_id: "task".into(),
+            depth: 0,
+            ghost: false,
+        };
+        for title in [
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+            "日本語の長いタスクの説明をすべて表示する",
+            "",
+        ] {
+            let task = Task::new_local(row.task_id.clone(), title.into(), None);
+            let lines = row_lines(Some(&task), &row, 10, today);
+            assert!(!lines.is_empty());
+            assert!(lines.iter().all(|line| line.width() <= 10));
+            let rendered: String = lines
+                .iter()
+                .map(|line| line.to_string().trim_end().to_string())
+                .collect();
+            assert_eq!(rendered, title);
+        }
+    }
+
+    #[test]
+    fn wrapped_subtask_keeps_indentation_date_and_style() {
+        let mut task = Task::new_local(
+            "child".into(),
+            "Prepare the quarterly planning document and collect feedback".into(),
+            Some("parent".into()),
+        );
+        task.due = Some("2026-10-06T00:00:00.000Z".into());
+        let row = Row {
+            task_id: task.id.clone(),
+            depth: 1,
+            ghost: true,
+        };
+        let lines = row_lines(
+            Some(&task),
+            &row,
+            26,
+            NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(),
+        );
+        assert!(lines.len() > 1);
+        assert!(lines[0].to_string().starts_with("  └ Prepare"));
+        assert!(lines[0].to_string().ends_with(" 10-06"));
+        for line in &lines[1..] {
+            assert!(line.to_string().starts_with("    "));
+            assert!(!line.to_string().contains('└'));
+            assert!(!line.to_string().contains("10-06"));
+        }
+        for line in &lines {
+            assert!(line.width() <= 26);
+            assert!(line.spans.iter().all(|span| {
+                span.style.fg == Some(Color::Red) && span.style.add_modifier.contains(Modifier::DIM)
+            }));
+        }
+    }
 }
