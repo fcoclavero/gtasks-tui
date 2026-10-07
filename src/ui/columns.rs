@@ -114,13 +114,30 @@ fn draw_column(
         .map(|row| {
             let task = column.task(&row.task_id);
             let mut lines = row_lines(task, row, inner.width as usize, today);
+            if !focused && !task.is_some_and(|task| dates::is_overdue(task, today)) {
+                let style = if column.selected.as_deref() == Some(row.task_id.as_str()) {
+                    Style::new().fg(Color::White)
+                } else {
+                    border_style.fg(Color::Reset)
+                };
+                for span in lines.iter_mut().flat_map(|line| line.spans.iter_mut()) {
+                    span.style = span.style.patch(style);
+                }
+            }
             // Ratatui skips items taller than the viewport entirely.
             if lines.len() > inner.height as usize {
                 lines.truncate(inner.height as usize);
                 if inner.height > 1 {
                     let last = lines.last_mut().unwrap();
+                    let indent = " ".repeat(row_marker(row).width());
                     *last = Line::styled(
-                        fit("… (more in editor)", inner.width as usize),
+                        format!(
+                            "{indent}{}",
+                            fit(
+                                "… (more in editor)",
+                                (inner.width as usize).saturating_sub(indent.width())
+                            )
+                        ),
                         last.spans[0].style,
                     );
                 }
@@ -131,18 +148,22 @@ fn draw_column(
     let highlight = if focused {
         Style::new().add_modifier(Modifier::REVERSED)
     } else {
-        Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        Style::new().add_modifier(Modifier::BOLD)
     };
     let list = List::new(items).highlight_style(highlight);
     column.list_state.select(column.selected_index());
     frame.render_stateful_widget(list, inner, &mut column.list_state);
 }
 
+fn row_marker(row: &Row) -> &'static str {
+    if row.depth > 0 { "  └ " } else { "• " }
+}
+
 fn row_lines(task: Option<&Task>, row: &Row, width: usize, today: NaiveDate) -> Vec<Line<'static>> {
     let Some(task) = task else {
         return vec![Line::from(fit("?", width))];
     };
-    let indent = if row.depth > 0 { "  └ " } else { "" };
+    let indent = row_marker(row);
     let date = dates::due_date(task.due.as_deref())
         .map(|d| dates::format_short(d, today))
         .unwrap_or_default();
@@ -188,7 +209,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::widgets::ListState;
 
-    use crate::model::TaskList;
+    use crate::model::{TaskList, TaskStatus};
     fn column(tasks: Vec<Task>) -> Column {
         let mut column = Column {
             list: TaskList {
@@ -209,18 +230,207 @@ mod tests {
     }
 
     fn render(terminal: &mut Terminal<TestBackend>, column: &mut Column) {
+        render_with_focus(terminal, column, true);
+    }
+
+    fn render_with_focus(terminal: &mut Terminal<TestBackend>, column: &mut Column, focused: bool) {
         terminal
             .draw(|frame| {
                 draw_column(
                     frame,
                     frame.area(),
                     column,
-                    true,
+                    focused,
                     NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(),
                     (false, false),
                 );
             })
             .unwrap();
+    }
+
+    #[test]
+    fn selection_style_tracks_focus_without_changing_overdue_color() {
+        let mut task = Task::new_local(
+            "task".into(),
+            "Review the quarterly planning document".into(),
+            None,
+        );
+        task.due = Some("2026-10-06T00:00:00.000Z".into());
+        let mut column = column(vec![task]);
+        let mut terminal = Terminal::new(TestBackend::new(28, 10)).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
+        let task_height = row_lines(column.task("task"), &column.rows[0], 26, today).len();
+        assert!(task_height > 1);
+
+        for focused in [true, false, true] {
+            render_with_focus(&mut terminal, &mut column, focused);
+            let expected = if focused {
+                Modifier::REVERSED
+            } else {
+                Modifier::BOLD
+            };
+            let buffer = terminal.backend().buffer();
+            for y in 1..=task_height as u16 {
+                let cell = &buffer[(3, y)];
+                assert_eq!(cell.modifier, expected, "focused={focused}, line={y}");
+                assert_eq!(cell.fg, Color::Red);
+            }
+            assert_eq!(buffer[(1, 1)].symbol(), "•");
+            assert_eq!(column.selected.as_deref(), Some("task"));
+            assert_eq!(column.list_state.selected(), Some(0));
+        }
+    }
+
+    #[test]
+    fn unfocused_list_keeps_selection_white_and_overdue_tasks_red() {
+        let mut normal = Task::new_local(
+            "normal".into(),
+            "Review the quarterly planning document".into(),
+            None,
+        );
+        normal.position = "000".into();
+        normal.due = Some("2026-10-08T00:00:00.000Z".into());
+        let mut overdue = Task::new_local(
+            "overdue".into(),
+            "Send the outstanding feedback to the team".into(),
+            None,
+        );
+        overdue.position = "001".into();
+        overdue.due = Some("2026-10-06T00:00:00.000Z".into());
+        let mut completed = Task::new_local("completed".into(), "Call the dentist".into(), None);
+        completed.position = "002".into();
+        completed.status = TaskStatus::Completed;
+        let mut column = column(vec![normal, overdue, completed]);
+        column.rebuild_rows(true);
+        let mut terminal = Terminal::new(TestBackend::new(28, 24)).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
+
+        for focused in [false, true] {
+            for selected in ["normal", "overdue", "completed"] {
+                column.selected = Some(selected.into());
+                render_with_focus(&mut terminal, &mut column, focused);
+                let buffer = terminal.backend().buffer();
+                let mut y = 1;
+                for row in &column.rows {
+                    let task = column.task(&row.task_id).unwrap();
+                    let is_selected = task.id == selected;
+                    let color = if task.id == "overdue" {
+                        Color::Red
+                    } else if focused && task.is_completed() {
+                        Color::Green
+                    } else if focused || is_selected {
+                        Color::White
+                    } else {
+                        Color::Reset
+                    };
+                    let modifier = if !focused && !is_selected && task.id != "overdue" {
+                        Modifier::DIM
+                    } else if !is_selected {
+                        Modifier::empty()
+                    } else if focused {
+                        Modifier::REVERSED
+                    } else {
+                        Modifier::BOLD
+                    };
+                    if task.due.is_some() {
+                        assert_eq!(buffer[(26, y)].fg, color);
+                        assert_eq!(buffer[(26, y)].modifier, modifier);
+                    }
+                    let height = row_lines(Some(task), row, 26, today).len() as u16;
+                    for line_y in y..y + height {
+                        for x in [1, 3] {
+                            let cell = &buffer[(x, line_y)];
+                            assert_eq!(
+                                cell.fg, color,
+                                "task={}, selected={selected}, focused={focused}, line={line_y}",
+                                task.id
+                            );
+                            assert_eq!(cell.modifier, modifier);
+                            if !focused && !is_selected && task.id != "overdue" {
+                                for border_or_title in [(0, line_y), (3, 0)] {
+                                    let reference = &buffer[border_or_title];
+                                    assert_eq!(cell.fg, reference.fg);
+                                    assert_eq!(cell.modifier, reference.modifier);
+                                }
+                            }
+                        }
+                    }
+                    y += height;
+                }
+                assert_eq!(column.selected.as_deref(), Some(selected));
+            }
+        }
+    }
+
+    #[test]
+    fn task_start_markers_distinguish_wrapped_lines_and_subtasks() {
+        let mut parent = Task::new_local(
+            "parent".into(),
+            "Review the quarterly planning document and send feedback".into(),
+            None,
+        );
+        parent.position = "000".into();
+        let child = Task::new_local(
+            "child".into(),
+            "Collect estimates".into(),
+            Some(parent.id.clone()),
+        );
+        let mut next = Task::new_local("next".into(), "Call the dentist".into(), None);
+        next.position = "001".into();
+        let mut column = column(vec![parent, child, next]);
+        let mut terminal = Terminal::new(TestBackend::new(28, 10)).unwrap();
+        render(&mut terminal, &mut column);
+
+        let buffer = terminal.backend().buffer();
+        let contents: Vec<String> = (1..=5)
+            .map(|y| {
+                (1..27)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            contents,
+            [
+                "• Review the quarterly",
+                "  planning document and",
+                "  send feedback",
+                "  └ Collect estimates",
+                "• Call the dentist",
+            ]
+        );
+        for y in 1..=3 {
+            assert!(buffer[(1, y)].modifier.contains(Modifier::REVERSED));
+            assert_eq!(buffer[(0, y)].symbol(), "│");
+            assert_eq!(buffer[(27, y)].symbol(), "│");
+        }
+        assert!(!buffer[(1, 4)].modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn task_start_marker_keeps_short_and_empty_titles_on_one_line() {
+        let row = Row {
+            task_id: "task".into(),
+            depth: 0,
+            ghost: false,
+        };
+        for title in ["Call", "abcdef", ""] {
+            let task = Task::new_local(row.task_id.clone(), title.into(), None);
+            let lines = row_lines(
+                Some(&task),
+                &row,
+                8,
+                NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(),
+            );
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].width(), 8);
+            assert_eq!(
+                lines[0].to_string().trim_end(),
+                format!("• {title}").trim_end()
+            );
+        }
     }
 
     #[test]
@@ -249,13 +459,21 @@ mod tests {
                     .to_string()
             })
             .collect();
-        assert_eq!(contents[0], "Review the quarterly 10-08");
+        assert_eq!(contents[0], "• Review the         10-08");
         let next_row = contents
             .iter()
-            .position(|line| line == "Next task")
+            .position(|line| line == "• Next task")
             .unwrap();
         assert!(next_row >= 10, "expected at least ten wrapped lines");
-        let rendered = contents[..next_row].join(" ").replace(" 10-08", "");
+        let rendered = contents[..next_row]
+            .iter()
+            .map(|line| line.strip_prefix("• ").unwrap_or(line).trim_start())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" 10-08", "");
+        for line in &contents[1..next_row] {
+            assert!(line.starts_with("  "));
+        }
         assert_eq!(
             rendered.split_whitespace().collect::<Vec<_>>(),
             description.split_whitespace().collect::<Vec<_>>()
@@ -279,7 +497,7 @@ mod tests {
         assert_eq!(column.list_state.offset(), 1);
         let buffer = terminal.backend().buffer();
         let selected: String = (1..27).map(|x| buffer[(x, 1)].symbol()).collect();
-        assert_eq!(selected.trim_end(), "Next task");
+        assert_eq!(selected.trim_end(), "• Next task");
         assert!(buffer[(1, 1)].modifier.contains(Modifier::REVERSED));
     }
 
@@ -297,8 +515,8 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let first: String = (1..27).map(|x| buffer[(x, 1)].symbol()).collect();
         let last: String = (1..27).map(|x| buffer[(x, 4)].symbol()).collect();
-        assert_eq!(first.trim_end(), "Review the quarterly");
-        assert_eq!(last.trim_end(), "… (more in editor)");
+        assert_eq!(first.trim_end(), "• Review the quarterly");
+        assert_eq!(last.trim_end(), "  … (more in editor)");
         assert!(buffer[(1, 1)].modifier.contains(Modifier::REVERSED));
         assert_eq!(buffer[(0, 4)].symbol(), "│");
         assert_eq!(buffer[(27, 4)].symbol(), "│");
@@ -323,7 +541,14 @@ mod tests {
             assert!(lines.iter().all(|line| line.width() <= 10));
             let rendered: String = lines
                 .iter()
-                .map(|line| line.to_string().trim_end().to_string())
+                .map(|line| {
+                    line.to_string()
+                        .chars()
+                        .skip(2)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
                 .collect();
             assert_eq!(rendered, title);
         }
