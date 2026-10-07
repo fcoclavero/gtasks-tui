@@ -5,11 +5,12 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use ratatui::widgets::ListState;
 use ratatui_textarea::TextArea;
 
 use crate::backend::BackendError;
+use crate::browser;
 use crate::details::{DetailsAction, DetailsState};
 use crate::model::{Task, TaskList, TaskPatch, TaskStatus};
 use crate::tree::{self, Row};
@@ -294,6 +295,7 @@ impl App {
     pub fn handle(&mut self, msg: Msg) {
         match msg {
             Msg::Input(Event::Key(key)) if key.kind != KeyEventKind::Release => self.on_key(key),
+            Msg::Input(Event::Mouse(mouse)) => self.on_mouse(mouse),
             Msg::Input(_) => {}
             Msg::Tick => {
                 if !self.refresh_in_flight {
@@ -521,10 +523,29 @@ impl App {
         let Mode::Details(details) = &mut self.mode else {
             return;
         };
-        match details.handle_key(key) {
+        let action = details.handle_key(key);
+        self.on_details_action(action);
+    }
+
+    fn on_mouse(&mut self, mouse: MouseEvent) {
+        if let Mode::Details(details) = &self.mode {
+            let action = details.handle_mouse(mouse);
+            self.on_details_action(action);
+        }
+    }
+
+    fn on_details_action(&mut self, action: DetailsAction) {
+        match action {
             DetailsAction::Continue => {}
             DetailsAction::Cancel => self.mode = Mode::Normal,
+            DetailsAction::OpenLink(url) => match browser::open_link(&url) {
+                Ok(()) => self.info("opened task in browser"),
+                Err(err) => self.set_status(Level::Error, err),
+            },
             DetailsAction::Save(patch) => {
+                let Mode::Details(details) = &self.mode else {
+                    return;
+                };
                 let tasklist_id = details.tasklist_id.clone();
                 let task_id = details.task_id.clone();
                 self.mode = Mode::Normal;
@@ -937,6 +958,43 @@ mod tests {
         app.focused_column()
             .map(|c| c.rows.iter().map(|r| r.task_id.clone()).collect())
             .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn invalid_task_link_reports_error_and_preserves_open_editor() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let (mut app, _rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Enter));
+        app.handle(key(KeyCode::Char('!')));
+        let Mode::Details(details) = &mut app.mode else {
+            panic!("expected details editor");
+        };
+        details.original.web_view_link = Some("javascript:alert(1)".into());
+        details.task_link_area = Rect::new(10, 20, 19, 1);
+        let patch = details.build_patch().unwrap();
+        for event in [
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 10,
+                row: 20,
+                modifiers: KeyModifiers::NONE,
+            }),
+        ] {
+            app.handle(Msg::Input(event));
+            let Mode::Details(details) = &app.mode else {
+                panic!("opening a link must keep the editor open");
+            };
+            assert_eq!(details.build_patch().unwrap(), patch);
+            assert_eq!(app.pending_count(), 0);
+            assert_eq!(app.status.as_ref().unwrap().level, Level::Error);
+            assert_eq!(
+                app.status.as_ref().unwrap().text,
+                "only valid HTTP(S) links can be opened"
+            );
+        }
     }
 
     #[tokio::test]

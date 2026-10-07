@@ -58,6 +58,7 @@ Completed tasks are hidden by default. The column title shows how many are hidde
 | `q` | Quit (waits up to 2 s for in-flight changes) |
 
 In the editor: `Tab` / `Shift-Tab` move between fields, `Enter` moves to the next field (inserts a newline in Notes), `Ctrl-S` saves, `Ctrl-U` clears the due date, `Esc` cancels (twice if there are unsaved changes).
+Click **Open task in browser** at the bottom of the editor, or press `Ctrl-O`, to open the task's web link in your default browser without closing the editor or saving changes. If Google does not provide a `webViewLink`, the editor shows **Task link unavailable**.
 
 ## Behaviour notes
 

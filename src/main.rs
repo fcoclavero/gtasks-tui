@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod browser;
 mod cli;
 mod dates;
 mod details;
@@ -13,6 +14,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
@@ -46,9 +49,14 @@ async fn run<B: TasksBackend>(backend: Arc<B>, args: &Args) -> Result<()> {
     app.start_refresh();
 
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &mut rx).await;
+    let result = async {
+        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+        event_loop(&mut terminal, &mut app, &mut rx).await
+    }
+    .await;
+    let mouse_result = execute!(terminal.backend_mut(), DisableMouseCapture);
     ratatui::restore();
-    result
+    result.and(mouse_result.map_err(Into::into))
 }
 
 async fn event_loop(

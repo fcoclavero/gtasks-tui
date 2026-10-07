@@ -1,6 +1,7 @@
 //! State and key handling for the task details editor (rendering lives in `ui::details`).
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
@@ -36,6 +37,7 @@ impl Field {
 pub enum DetailsAction {
     Continue,
     Save(TaskPatch),
+    OpenLink(String),
     Cancel,
 }
 
@@ -49,6 +51,7 @@ pub struct DetailsState {
     pub focus: Field,
     pub error: Option<(Field, String)>,
     pub confirm_discard: bool,
+    pub task_link_area: Rect,
 }
 
 fn single_line(text: &str) -> TextArea<'static> {
@@ -88,6 +91,7 @@ impl DetailsState {
             focus: Field::Title,
             error: None,
             confirm_discard: false,
+            task_link_area: Rect::default(),
         }
     }
 
@@ -101,6 +105,31 @@ impl DetailsState {
 
     pub fn notes_text(&self) -> String {
         self.notes.lines().join("\n")
+    }
+
+    pub fn task_url(&self) -> Option<&str> {
+        self.original
+            .web_view_link
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    fn open_task_link(&self) -> DetailsAction {
+        self.task_url()
+            .map(|url| DetailsAction::OpenLink(url.to_string()))
+            .unwrap_or(DetailsAction::Continue)
+    }
+
+    pub fn handle_mouse(&self, mouse: MouseEvent) -> DetailsAction {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self
+                .task_link_area
+                .contains(Position::new(mouse.column, mouse.row))
+        {
+            self.open_task_link()
+        } else {
+            DetailsAction::Continue
+        }
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -137,6 +166,7 @@ impl DetailsState {
     pub fn handle_key(&mut self, key: KeyEvent) -> DetailsAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            KeyCode::Char('o') if ctrl => self.open_task_link(),
             KeyCode::Esc => {
                 if !self.is_dirty() || self.confirm_discard {
                     return DetailsAction::Cancel;
@@ -208,6 +238,69 @@ mod tests {
         t.due = Some("2026-10-07T00:00:00.000Z".into());
         t.notes = Some("line one\nline two".into());
         t
+    }
+
+    #[test]
+    fn ctrl_o_opens_task_link_without_changing_edits_or_focus() {
+        let mut task = task();
+        let url = "https://tasks.google.com/task/t1";
+        task.web_view_link = Some(url.into());
+        let mut details = DetailsState::new("l".into(), &task);
+        details.handle_key(key(KeyCode::Char('!')));
+        let patch = details.build_patch().unwrap();
+        for focus in [Field::Title, Field::Due, Field::Notes] {
+            details.focus = focus;
+            assert_eq!(
+                details.handle_key(ctrl('o')),
+                DetailsAction::OpenLink(url.into())
+            );
+            assert_eq!(details.focus, focus);
+            assert_eq!(details.build_patch().unwrap(), patch);
+        }
+    }
+
+    #[test]
+    fn only_left_clicks_inside_task_link_open_it() {
+        let mut task = task();
+        let url = "https://tasks.google.com/task/t1";
+        task.web_view_link = Some(url.into());
+        let mut details = DetailsState::new("l".into(), &task);
+        details.task_link_area = Rect::new(10, 20, 19, 1);
+        for (kind, column, row, opens) in [
+            (MouseEventKind::Down(MouseButton::Left), 10, 20, true),
+            (MouseEventKind::Down(MouseButton::Left), 28, 20, true),
+            (MouseEventKind::Down(MouseButton::Left), 29, 20, false),
+            (MouseEventKind::Down(MouseButton::Left), 10, 19, false),
+            (MouseEventKind::Down(MouseButton::Right), 10, 20, false),
+            (MouseEventKind::Up(MouseButton::Left), 10, 20, false),
+            (MouseEventKind::Moved, 10, 20, false),
+        ] {
+            assert_eq!(
+                details.handle_mouse(MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                if opens {
+                    DetailsAction::OpenLink(url.into())
+                } else {
+                    DetailsAction::Continue
+                }
+            );
+        }
+        assert!(!details.is_dirty());
+    }
+
+    #[test]
+    fn missing_task_link_does_not_open_or_edit() {
+        let mut details = DetailsState::new("l".into(), &task());
+        for url in [None, Some(""), Some("  ")] {
+            details.original.web_view_link = url.map(String::from);
+            assert!(details.task_url().is_none());
+            assert_eq!(details.handle_key(ctrl('o')), DetailsAction::Continue);
+            assert!(!details.is_dirty());
+        }
     }
 
     #[test]

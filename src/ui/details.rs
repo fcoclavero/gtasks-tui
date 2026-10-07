@@ -1,7 +1,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui_textarea::TextArea;
 
@@ -28,14 +28,17 @@ pub fn draw(frame: &mut Frame, area: Rect, details: &mut DetailsState) {
     } else {
         links.len().min(4) as u16 + 2
     };
-    let [title_area, due_area, notes_area, links_area, footer_area] = Layout::vertical([
+    let [fields_area, bottom_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(inner);
+    let [footer_area, task_link_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(bottom_area);
+    let [title_area, due_area, notes_area, links_area] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Min(4),
         Constraint::Length(links_rows),
-        Constraint::Length(1),
     ])
-    .areas(inner);
+    .areas(fields_area);
 
     let focus = details.focus;
     let error_field = details.error.as_ref().map(|e| e.0);
@@ -86,6 +89,24 @@ pub fn draw(frame: &mut Frame, area: Rect, details: &mut DetailsState) {
         .dim()
     };
     frame.render_widget(Paragraph::new(footer), footer_area);
+
+    details.task_link_area = Rect::default();
+    let task_link = if details.task_url().is_some() {
+        let label = "Open task in browser";
+        details.task_link_area = Rect::new(
+            task_link_area.x,
+            task_link_area.y,
+            task_link_area.width.min(label.len() as u16),
+            task_link_area.height,
+        );
+        Line::from(vec![
+            Span::raw(label).cyan().underlined(),
+            Span::raw(" (click or Ctrl-O)").dim(),
+        ])
+    } else {
+        Line::from("Task link unavailable").dim()
+    };
+    frame.render_widget(Paragraph::new(task_link), task_link_area);
 }
 
 fn style_field(area: &mut TextArea<'static>, title: &'static str, focused: bool, error: bool) {
@@ -115,6 +136,49 @@ mod tests {
 
     use crate::model::Task;
 
+    #[test]
+    fn task_link_is_clickable_on_the_bottom_row_and_updates_on_resize() {
+        let mut task = Task::new_local("task".into(), "Planning".into(), None);
+        task.web_view_link = Some("https://tasks.google.com/task/task".into());
+        let mut details = DetailsState::new("list".into(), &task);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (width, height) in [(80, 24), (44, 18), (12, 8), (80, 24)] {
+            terminal.backend_mut().resize(width, height);
+            terminal
+                .draw(|frame| draw(frame, frame.area(), &mut details))
+                .unwrap();
+            let area = details.task_link_area;
+            assert!(area.width > 0 && area.height == 1);
+            let buffer = terminal.backend().buffer();
+            let label: String = (area.x..area.right())
+                .map(|x| buffer[(x, area.y)].symbol())
+                .collect();
+            assert!("Open task in browser".starts_with(&label));
+            assert_eq!(buffer[(area.x, area.y)].fg, Color::Cyan);
+            assert!(
+                buffer[(area.x, area.y)]
+                    .modifier
+                    .contains(Modifier::UNDERLINED)
+            );
+            assert_eq!(buffer[(area.x, area.bottom())].symbol(), "─");
+        }
+
+        details.original.web_view_link = None;
+        terminal
+            .draw(|frame| draw(frame, frame.area(), &mut details))
+            .unwrap();
+        assert_eq!(details.task_link_area, Rect::default());
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .contains("Task link unavailable")
+        );
+    }
+
     fn render_notes(
         terminal: &mut Terminal<TestBackend>,
         details: &mut DetailsState,
@@ -134,14 +198,15 @@ mod tests {
                 } else {
                     details.original.links.len().min(4) as u16 + 2
                 };
-                let [_, _, notes_area, _, _] = Layout::vertical([
+                let [fields_area, _] =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(inner);
+                let [_, _, notes_area, _] = Layout::vertical([
                     Constraint::Length(3),
                     Constraint::Length(3),
                     Constraint::Min(4),
                     Constraint::Length(links_rows),
-                    Constraint::Length(1),
                 ])
-                .areas(inner);
+                .areas(fields_area);
                 notes_inner = Block::bordered().inner(notes_area);
                 draw(frame, area, details);
             })
