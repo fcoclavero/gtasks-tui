@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
-use ratatui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
 use crate::dates;
 use crate::model::{Task, TaskPatch};
@@ -73,6 +73,7 @@ impl DetailsState {
             .map(String::from)
             .collect();
         let mut notes = TextArea::new(notes_lines);
+        notes.set_wrap_mode(WrapMode::WordOrGlyph);
         notes.set_cursor_line_style(Style::default());
         notes.set_placeholder_text("Notes");
         notes.move_cursor(CursorMove::Bottom);

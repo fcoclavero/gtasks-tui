@@ -103,3 +103,228 @@ fn style_field(area: &mut TextArea<'static>, title: &'static str, focused: bool,
         Style::default()
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::details::DetailsAction;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui_textarea::CursorMove;
+
+    use crate::model::Task;
+
+    fn render_notes(
+        terminal: &mut Terminal<TestBackend>,
+        details: &mut DetailsState,
+    ) -> (Rect, Vec<String>) {
+        let mut notes_inner = Rect::default();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let popup = centered(
+                    area,
+                    (area.width * 9 / 10).clamp(40, 100),
+                    (area.height * 9 / 10).clamp(14, 36),
+                );
+                let inner = Block::bordered().inner(popup);
+                let links_rows = if details.original.links.is_empty() {
+                    0
+                } else {
+                    details.original.links.len().min(4) as u16 + 2
+                };
+                let [_, _, notes_area, _, _] = Layout::vertical([
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Min(4),
+                    Constraint::Length(links_rows),
+                    Constraint::Length(1),
+                ])
+                .areas(inner);
+                notes_inner = Block::bordered().inner(notes_area);
+                draw(frame, area, details);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines = (notes_inner.y..notes_inner.bottom())
+            .map(|y| {
+                (notes_inner.x..notes_inner.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        for y in notes_inner.y..notes_inner.bottom() {
+            assert_eq!(buffer[(notes_inner.x - 1, y)].symbol(), "│");
+            assert_eq!(buffer[(notes_inner.right(), y)].symbol(), "│");
+        }
+        (notes_inner, lines)
+    }
+
+    #[test]
+    fn long_notes_wrap_inside_details_without_changing_saved_text() {
+        let notes = concat!(
+            "Review the quarterly planning document and send feedback before Friday, ",
+            "including the budget assumptions, staffing requirements, project milestones, ",
+            "delivery risks, and follow-up actions for every team involved. ",
+            "Document the dependencies between teams, confirm the rollout schedule, ",
+            "record unresolved questions, and agree on owners for every action item. ",
+            "Include the proposed review dates and communication plan for stakeholders.",
+            "\n\nFollow-up: share the final summary with the team."
+        );
+        let mut task = Task::new_local("task".into(), "Planning".into(), None);
+        task.notes = Some(notes.into());
+        let mut details = DetailsState::new("list".into(), &task);
+        details.notes.move_cursor(CursorMove::Jump(0, 0));
+        let mut terminal = Terminal::new(TestBackend::new(44, 40)).unwrap();
+
+        for focus in [Field::Title, Field::Notes] {
+            details.focus = focus;
+            let (_, lines) = render_notes(&mut terminal, &mut details);
+            assert_eq!(lines[0], "Review the quarterly planning");
+            assert!(
+                lines.iter().filter(|line| !line.is_empty()).count() >= 10,
+                "expected notes to occupy at least ten wrapped lines: {lines:?}"
+            );
+            assert_eq!(
+                lines.join(" ").split_whitespace().collect::<Vec<_>>(),
+                notes.split_whitespace().collect::<Vec<_>>()
+            );
+            assert_eq!(details.notes_text(), notes);
+            assert!(!details.is_dirty());
+            assert!(details.build_patch().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn wrapped_notes_scroll_vertically_and_keep_cursor_visible() {
+        let notes = format!(
+            "Start of notes. {}END OF NOTES.",
+            "Review the planning document and record every follow-up action. ".repeat(30)
+        );
+        let mut task = Task::new_local("task".into(), "Planning".into(), None);
+        task.notes = Some(notes.clone());
+        let mut details = DetailsState::new("list".into(), &task);
+        details.focus = Field::Notes;
+        let mut terminal = Terminal::new(TestBackend::new(44, 18)).unwrap();
+
+        let (_, lines) = render_notes(&mut terminal, &mut details);
+        assert!(lines.join(" ").contains("END OF NOTES."));
+        assert!(!lines.join(" ").contains("Start of notes."));
+
+        details.notes.move_cursor(CursorMove::Jump(0, 0));
+        let (_, lines) = render_notes(&mut terminal, &mut details);
+        assert!(lines[0].starts_with("Start of notes."));
+        assert!(!lines.join(" ").contains("END OF NOTES."));
+
+        let mut reached_end = false;
+        for _ in 0..100 {
+            let previous = details.notes.cursor();
+            details.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            assert_eq!(details.notes.cursor().0, 0);
+            assert!(details.notes.cursor().1 > previous.1);
+            let (inner, lines) = render_notes(&mut terminal, &mut details);
+            let buffer = terminal.backend().buffer();
+            let cursor_cells = (inner.y..inner.bottom())
+                .flat_map(|y| (inner.x..inner.right()).map(move |x| (x, y)))
+                .filter(|&position| buffer[position].modifier.contains(Modifier::REVERSED))
+                .count();
+            assert_eq!(cursor_cells, 1);
+            if lines.join(" ").contains("END OF NOTES.") {
+                reached_end = true;
+                break;
+            }
+        }
+        assert!(reached_end, "could not scroll to the end of wrapped notes");
+        let previous = details.notes.cursor();
+        details.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(details.notes.cursor().1 < previous.1);
+        assert_eq!(details.notes_text(), notes);
+        assert!(!details.is_dirty());
+    }
+
+    #[test]
+    fn editing_wrapped_notes_preserves_logical_lines_and_undo() {
+        let notes = concat!(
+            "Review the planning document and record every follow-up action ",
+            "before sharing the summary with all stakeholders."
+        );
+        let mut task = Task::new_local("task".into(), "Planning".into(), None);
+        task.notes = Some(notes.into());
+        let mut details = DetailsState::new("list".into(), &task);
+        details.focus = Field::Notes;
+        details.notes.move_cursor(CursorMove::Jump(0, 0));
+        let mut terminal = Terminal::new(TestBackend::new(44, 24)).unwrap();
+        render_notes(&mut terminal, &mut details);
+
+        details.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let cursor = details.notes.cursor();
+        let col = cursor.1;
+        assert_eq!(cursor.0, 0);
+        assert!(col > 0, "Down should move onto a wrapped visual line");
+        details.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        let expected = format!("{}!{}", &notes[..col], &notes[col..]);
+        render_notes(&mut terminal, &mut details);
+        assert_eq!(details.notes.lines().len(), 1);
+        assert_eq!(details.notes_text(), expected);
+        match details.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)) {
+            DetailsAction::Save(patch) => assert_eq!(patch.notes, Some(expected)),
+            other => panic!("unexpected action: {other:?}"),
+        }
+        assert!(details.notes.undo());
+        assert_eq!(details.notes_text(), notes);
+        assert!(!details.is_dirty());
+
+        details.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        render_notes(&mut terminal, &mut details);
+        assert_eq!(details.notes.lines().len(), 2);
+        assert_eq!(
+            details.notes_text(),
+            format!("{}\n{}", &notes[..col], &notes[col..])
+        );
+        assert!(details.notes.undo());
+        assert_eq!(details.notes_text(), notes);
+    }
+
+    #[test]
+    fn wrapped_notes_reflow_on_resize_without_losing_unicode_or_long_words() {
+        for notes in [
+            "abcdefghijklmnopqrstuvwxyz0123456789".repeat(4),
+            "日本語の長いメモをすべて表示する".repeat(4),
+            "e\u{301}".repeat(100),
+        ] {
+            let mut task = Task::new_local("task".into(), "Planning".into(), None);
+            task.notes = Some(notes.clone());
+            let mut details = DetailsState::new("list".into(), &task);
+            details.focus = Field::Notes;
+            let mut terminal = Terminal::new(TestBackend::new(44, 40)).unwrap();
+            let mut narrow_height = 0;
+            for width in [44, 80, 44] {
+                terminal.backend_mut().resize(width, 40);
+                let (_, lines) = render_notes(&mut terminal, &mut details);
+                assert_eq!(
+                    lines
+                        .join("")
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect::<String>(),
+                    notes
+                );
+                let height = lines.iter().filter(|line| !line.is_empty()).count();
+                if width == 44 {
+                    assert!(height >= 3);
+                    if narrow_height > 0 {
+                        assert_eq!(height, narrow_height);
+                    }
+                    narrow_height = height;
+                } else {
+                    assert!(height < narrow_height);
+                }
+                assert_eq!(details.notes_text(), notes);
+                assert!(!details.is_dirty());
+            }
+        }
+    }
+}
