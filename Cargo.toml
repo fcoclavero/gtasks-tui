@@ -1,0 +1,25 @@
+[package]
+name = "gtasks-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI for Google Tasks, backed by the gws CLI"
+license = "MIT"
+repository = "https://github.com/fcoclavero/gtasks-tui"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+ratatui = "0.30"
+ratatui-textarea = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
+unicode-width = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
