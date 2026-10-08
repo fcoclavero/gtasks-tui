@@ -4,6 +4,7 @@ mod browser;
 mod cli;
 mod dates;
 mod details;
+mod due_input;
 mod model;
 mod tree;
 mod ui;

@@ -6,6 +6,7 @@ use ratatui::style::Style;
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
 use crate::dates;
+use crate::due_input::DueInput;
 use crate::model::{Task, TaskPatch};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +47,7 @@ pub struct DetailsState {
     pub task_id: String,
     pub original: Task,
     pub title: TextArea<'static>,
-    pub due: TextArea<'static>,
+    pub due: DueInput,
     pub notes: TextArea<'static>,
     pub focus: Field,
     pub error: Option<(Field, String)>,
@@ -63,11 +64,7 @@ fn single_line(text: &str) -> TextArea<'static> {
 
 impl DetailsState {
     pub fn new(tasklist_id: String, task: &Task) -> Self {
-        let due_text = dates::due_date(task.due.as_deref())
-            .map(|d| d.to_string())
-            .unwrap_or_default();
-        let mut due = single_line(&due_text);
-        due.set_placeholder_text("YYYY-MM-DD (empty = no date)");
+        let due = DueInput::new(dates::due_date(task.due.as_deref()), dates::today());
         let notes_lines: Vec<String> = task
             .notes
             .as_deref()
@@ -100,7 +97,7 @@ impl DetailsState {
     }
 
     pub fn due_text(&self) -> String {
-        self.due.lines().join("").trim().to_string()
+        self.due.text()
     }
 
     pub fn notes_text(&self) -> String {
@@ -133,11 +130,11 @@ impl DetailsState {
     }
 
     pub fn is_dirty(&self) -> bool {
-        let orig_due = dates::due_date(self.original.due.as_deref())
-            .map(|d| d.to_string())
-            .unwrap_or_default();
+        let due_changed = self.due.resolve().map_or(true, |due| {
+            due != dates::due_date(self.original.due.as_deref())
+        });
         self.title_text() != self.original.title
-            || self.due_text() != orig_due
+            || due_changed
             || self.notes_text() != self.original.notes.clone().unwrap_or_default()
     }
 
@@ -147,7 +144,7 @@ impl DetailsState {
         if title.is_empty() {
             return Err((Field::Title, "title cannot be empty".into()));
         }
-        let due = dates::parse_due_input(&self.due_text()).map_err(|e| (Field::Due, e))?;
+        let due = self.due.resolve().map_err(|e| (Field::Due, e))?;
         let notes = self.notes_text();
 
         let mut patch = TaskPatch::default();
@@ -197,9 +194,8 @@ impl DetailsState {
                 DetailsAction::Continue
             }
             KeyCode::Char('u') if ctrl && self.focus == Field::Due => {
-                self.due = single_line("");
-                self.due
-                    .set_placeholder_text("YYYY-MM-DD (empty = no date)");
+                self.due.clear();
+                self.confirm_discard = false;
                 self.error = None;
                 DetailsAction::Continue
             }
@@ -208,12 +204,15 @@ impl DetailsState {
                 if self.error.as_ref().is_some_and(|(f, _)| *f == self.focus) {
                     self.error = None;
                 }
-                let area = match self.focus {
-                    Field::Title => &mut self.title,
-                    Field::Due => &mut self.due,
-                    Field::Notes => &mut self.notes,
-                };
-                area.input(key);
+                match self.focus {
+                    Field::Title => {
+                        self.title.input(key);
+                    }
+                    Field::Due => self.due.handle_key(key),
+                    Field::Notes => {
+                        self.notes.input(key);
+                    }
+                }
                 DetailsAction::Continue
             }
         }
@@ -344,6 +343,41 @@ mod tests {
         assert_eq!(d.handle_key(ctrl('s')), DetailsAction::Continue);
         assert_eq!(d.focus, Field::Due);
         assert!(d.error.is_some());
+    }
+    #[test]
+    fn shorthand_save_matches_preview_and_same_date_is_not_dirty() {
+        let mut details = DetailsState::new("l".into(), &task());
+        let today = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
+        details.due = DueInput::new(dates::due_date(details.original.due.as_deref()), today);
+        details.focus = Field::Due;
+        for c in "today".chars() {
+            details.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(!details.is_dirty());
+        assert_eq!(details.build_patch().unwrap(), TaskPatch::default());
+        details.handle_key(ctrl('u'));
+        for c in "tomorrow".chars() {
+            details.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(details.is_dirty());
+        assert_eq!(
+            details.build_patch().unwrap().due,
+            Some(details.due.resolve().unwrap())
+        );
+    }
+
+    #[test]
+    fn clearing_date_saves_none_and_partial_mask_blocks_save() {
+        let mut details = DetailsState::new("l".into(), &task());
+        details.focus = Field::Due;
+        details.handle_key(ctrl('u'));
+        assert_eq!(details.build_patch().unwrap().due, Some(None));
+        details.handle_key(key(KeyCode::Char('2')));
+        assert_eq!(details.handle_key(ctrl('s')), DetailsAction::Continue);
+        assert_eq!(details.error.as_ref().map(|e| e.0), Some(Field::Due));
+        assert_eq!(details.due.area.lines()[0], "2___-__-__");
+        details.handle_key(ctrl('u'));
+        assert!(details.error.is_none());
     }
 
     #[test]

@@ -65,6 +65,15 @@ Press `s` to toggle all lists between Google's position order (the default) and 
 In the editor: `Tab` / `Shift-Tab` move between fields, `Enter` moves to the next field (inserts a newline in Notes), `Ctrl-S` saves, `Ctrl-U` clears the due date, `Esc` cancels (twice if there are unsaved changes).
 Click **Open task in browser** at the bottom of the editor, or press `Ctrl-O`, to open the task's web link in your default browser without closing the editor or saving changes. If Google does not provide a `webViewLink`, the editor shows **Task link unavailable**.
 
+### Due-date input
+
+- Type an exact date with or without dashes (`2026-12-24` or `20261224`). Digits overwrite the fixed `YYYY-MM-DD` mask; dashes are always present and cannot be edited. `←` / `→` skip them, and `Home` / `End` jump to the first / last digit. `Backspace` / `Delete` clear digits without removing the separators.
+- Type `today`, `tomorrow`, a weekday (`fri` or `friday`), `next mon`, or an offset (`+3d`, `+2w`, or `-1d`). Typing a letter or `+` replaces the numeric date with shorthand; use `Ctrl-U` to start fresh. A live preview shows the resolved date before saving.
+- Weekdays mean the next occurrence, including today; `next <weekday>` always means a future occurrence. Relative dates use the local day when the editor opened, keeping the preview and saved date consistent.
+- `↑` / `↓` increase / decrease the year, month, or day under the cursor by one. When the field is empty, the first press sets today and selects the day; subsequent presses adjust it. With shorthand, arrows resolve it into a numeric date and adjust the day.
+- Month / year adjustments clamp to the last valid day (January 31 becomes February 28 or 29); day adjustments cross month / year boundaries. `Shift-↑` / `Shift-↓` adjust by a week when the cursor is in the day segment.
+- `Ctrl-U` clears the date, leaving an empty `____-__-__` mask. Incomplete or invalid dates block saving.
+
 ## Behaviour notes
 
 - Changes apply immediately in the UI and are sent to Google in the background. If a call fails, the change is reverted and the error is shown in the status bar.

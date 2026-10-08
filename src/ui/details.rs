@@ -34,7 +34,7 @@ pub fn draw(frame: &mut Frame, area: Rect, details: &mut DetailsState) {
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(bottom_area);
     let [title_area, due_area, notes_area, links_area] = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Length(3),
+        Constraint::Length(4),
         Constraint::Min(4),
         Constraint::Length(links_rows),
     ])
@@ -49,14 +49,28 @@ pub fn draw(frame: &mut Frame, area: Rect, details: &mut DetailsState) {
         error_field == Some(Field::Title),
     );
     style_field(
-        &mut details.due,
-        " Due (YYYY-MM-DD) ",
+        &mut details.due.area,
+        " Due ",
         focus == Field::Due,
         error_field == Some(Field::Due),
     );
     style_field(&mut details.notes, " Notes ", focus == Field::Notes, false);
     frame.render_widget(&details.title, title_area);
-    frame.render_widget(&details.due, due_area);
+    let [due_input_area, preview_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Length(1)]).areas(due_area);
+    frame.render_widget(&details.due.area, due_input_area);
+    let preview = match details.due.resolve() {
+        Ok(Some(date)) => {
+            Line::from(format!(" → {}", date.format("%a, %b %-d, %Y (%Y-%m-%d)"))).cyan()
+        }
+        Ok(None) => Line::from(" No due date · ↑/↓ starts at today").dim(),
+        Err(_) => Line::from(format!(
+            " Invalid date: {} · try today, fri, +3d",
+            details.due_text()
+        ))
+        .yellow(),
+    };
+    frame.render_widget(Paragraph::new(preview), preview_area);
     frame.render_widget(&details.notes, notes_area);
 
     if links_rows > 0 {
@@ -82,6 +96,9 @@ pub fn draw(frame: &mut Frame, area: Rect, details: &mut DetailsState) {
         Line::from(err.as_str()).red()
     } else if details.confirm_discard {
         Line::from("Unsaved changes: Esc again to discard, Ctrl-S to save").yellow()
+    } else if focus == Field::Due {
+        Line::from("←/→ segment · ↑/↓ adjust · Shift ↑/↓ week (day) · Ctrl-U clear · Ctrl-S save")
+            .dim()
     } else {
         Line::from(
             "Tab/Shift-Tab fields · Enter next · Ctrl-S save · Ctrl-U clear due · Esc cancel",
@@ -135,6 +152,72 @@ mod tests {
     use ratatui_textarea::CursorMove;
 
     use crate::model::Task;
+
+    #[test]
+    fn due_preview_updates_and_cursor_never_highlights_a_dash() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
+        let task = Task::new_local("task".into(), "Planning".into(), None);
+        let mut details = DetailsState::new("list".into(), &task);
+        details.due = crate::due_input::DueInput::new(None, today);
+        details.focus = Field::Due;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, frame.area(), &mut details))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("____-__-__"));
+        assert!(text.contains("No due date"));
+        assert!(!details.is_dirty());
+
+        for c in "tomorrow".chars() {
+            details.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        for width in [80, 44, 80] {
+            terminal.backend_mut().resize(width, 24);
+            terminal
+                .draw(|frame| draw(frame, frame.area(), &mut details))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
+            assert!(text.contains("tomorrow"));
+            assert!(text.contains("Thu, Oct 8, 2026 (2026-10-08)"));
+        }
+        assert_eq!(
+            details.build_patch().unwrap().due,
+            Some(Some(today.succ_opt().unwrap()))
+        );
+
+        details.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        details.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        for _ in 0..10 {
+            terminal
+                .draw(|frame| draw(frame, frame.area(), &mut details))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let cursor_cells: Vec<_> = buffer
+                .content
+                .iter()
+                .filter(|c| c.modifier.contains(Modifier::REVERSED))
+                .collect();
+            assert_eq!(cursor_cells.len(), 1);
+            assert!(cursor_cells[0].symbol().bytes().all(|b| b.is_ascii_digit()));
+            assert!(details.due.area.cursor().1 != 4 && details.due.area.cursor().1 != 7);
+            details.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        details.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| draw(frame, frame.area(), &mut details))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Invalid date: x"));
+    }
 
     #[test]
     fn task_link_is_clickable_on_the_bottom_row_and_updates_on_resize() {
@@ -202,7 +285,7 @@ mod tests {
                     Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(inner);
                 let [_, _, notes_area, _] = Layout::vertical([
                     Constraint::Length(3),
-                    Constraint::Length(3),
+                    Constraint::Length(4),
                     Constraint::Min(4),
                     Constraint::Length(links_rows),
                 ])
