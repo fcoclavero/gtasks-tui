@@ -502,6 +502,7 @@ impl App {
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Left | KeyCode::Char('h') => self.focus_by(-1),
             KeyCode::Right | KeyCode::Char('l') => self.focus_by(1),
+            KeyCode::Char(number @ '1'..='9') => self.focus_column((number as u8 - b'1') as usize),
             KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
             KeyCode::PageUp => self.move_by(-10),
@@ -622,7 +623,11 @@ impl App {
         }
         let max = self.columns.len() as isize - 1;
         let target = (self.focused as isize + delta).clamp(0, max) as usize;
-        if target == self.focused {
+        self.focus_column(target);
+    }
+
+    fn focus_column(&mut self, target: usize) {
+        if target >= self.columns.len() || target == self.focused {
             return;
         }
         let show_completed = self.show_completed;
@@ -977,6 +982,82 @@ mod tests {
         app.focused_column()
             .map(|c| c.rows.iter().map(|r| r.task_id.clone()).collect())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn number_shortcuts_follow_column_order_and_ignore_missing_lists() {
+        for count in [0, 3, 11] {
+            let mut app = App::new(Box::new(|_| {}));
+            app.reconcile_columns(
+                (0..count)
+                    .map(|i| TaskList {
+                        id: format!("list-{i}"),
+                        title: format!("List {i}"),
+                    })
+                    .collect(),
+            );
+            for number in '1'..='9' {
+                let before = app.focused;
+                app.handle(key(KeyCode::Char(number)));
+                let index = (number as u8 - b'1') as usize;
+                assert_eq!(app.focused, if index < count { index } else { before });
+            }
+            let before = app.focused;
+            app.handle(key(KeyCode::Char('0')));
+            assert_eq!(app.focused, before);
+            if count > 9 {
+                app.handle(key(KeyCode::Right));
+                assert_eq!(app.focused, 9);
+                app.handle(key(KeyCode::Char('1')));
+                assert_eq!(app.focused, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn number_shortcuts_preserve_selection_and_clear_done_grace_only_when_leaving() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char(' ')));
+        app.handle(key(KeyCode::Char('1')));
+        assert_eq!(app.columns[0].pinned.as_deref(), Some("inbox-1"));
+        app.handle(key(KeyCode::Char('9')));
+        assert_eq!(app.columns[0].pinned.as_deref(), Some("inbox-1"));
+        app.handle(key(KeyCode::Char('2')));
+        assert!(app.columns[0].pinned.is_none());
+        assert!(!app.columns[0].rows.iter().any(|r| r.task_id == "inbox-1"));
+        app.handle(key(KeyCode::Down));
+        let selected = app.columns[1].selected.clone();
+        app.handle(key(KeyCode::Char('1')));
+        app.handle(key(KeyCode::Char('2')));
+        assert_eq!(app.columns[1].selected, selected);
+        settle(&mut app, &mut rx).await;
+    }
+
+    #[tokio::test]
+    async fn numbers_remain_text_in_task_editors() {
+        let (mut app, _rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Enter));
+        for number in '1'..='9' {
+            app.handle(key(KeyCode::Char(number)));
+        }
+        let Mode::Details(details) = &app.mode else {
+            panic!("expected details editor");
+        };
+        assert_eq!(
+            details.build_patch().unwrap().title.as_deref(),
+            Some("Pay electricity bill123456789")
+        );
+        assert_eq!(app.focused, 0);
+        app.mode = Mode::Normal;
+        app.handle(key(KeyCode::Char('n')));
+        for number in '1'..='9' {
+            app.handle(key(KeyCode::Char(number)));
+        }
+        let Mode::NewTask(state) = &app.mode else {
+            panic!("expected new task prompt");
+        };
+        assert_eq!(state.input.lines(), &["123456789"]);
+        assert_eq!(app.focused, 0);
     }
 
     #[tokio::test]

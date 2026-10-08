@@ -33,6 +33,7 @@ gtasks-tui --mock --mock-fail-every 2 --mock-latency-ms 400
 ## Layout
 
 One column per task list. Subtasks are nested under their parent. Each row shows the title and the due date (`MM-DD` this year, full date otherwise).
+The first nine columns are numbered left to right, with `[1]`–`[9]` prefixes in their titles. Press the corresponding number to jump to a list, even when it is off-screen. Additional columns have no number and remain accessible with the left/right keys.
 
 - Green: completed.
 - Red: overdue (due date before today, not completed).
@@ -48,6 +49,7 @@ Press `s` to toggle all lists between Google's position order (the default) and 
 | Key | Action |
 | ------------- | ------------------------------------------------------------- |
 | `←` `→` `h` `l` | Switch task list |
+| `1`–`9` | Jump to the corresponding task list, numbered left to right |
 | `↑` `↓` `j` `k` | Move between tasks and subtasks |
 | `g` `G` | First / last task |
 | `Space` | Toggle done. The task stays visible until you move away, so you can undo. |

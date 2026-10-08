@@ -61,6 +61,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App, today: NaiveDate) {
             frame,
             rects[slot],
             column,
+            index,
             index == focused,
             today,
             (marker_left, marker_right),
@@ -72,15 +73,21 @@ fn draw_column(
     frame: &mut Frame,
     area: Rect,
     column: &mut Column,
+    index: usize,
     focused: bool,
     today: NaiveDate,
     (more_left, more_right): (bool, bool),
 ) {
-    let mut title = format!(" {} ", column.list.title);
+    let mut title = if index < 9 {
+        format!(" [{}] {}", index + 1, column.list.title)
+    } else {
+        format!(" {}", column.list.title)
+    };
     let hidden = column.hidden_done_count();
     if hidden > 0 {
-        title = format!(" {} ({hidden} done hidden) ", column.list.title);
+        title.push_str(&format!(" ({hidden} done hidden)"));
     }
+    title.push(' ');
     let border_style = if focused {
         Style::new().fg(Color::Cyan)
     } else {
@@ -268,12 +275,76 @@ mod tests {
                     frame,
                     frame.area(),
                     column,
+                    0,
                     focused,
                     NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(),
                     (false, false),
                 );
             })
             .unwrap();
+    }
+
+    #[test]
+    fn column_shortcut_prefixes_stop_at_nine_and_survive_scrolling() {
+        for hidden_done in [false, true] {
+            let mut app = App::new(Box::new(|_| {}));
+            app.columns = (1..=11)
+                .map(|number| {
+                    let tasks = if hidden_done {
+                        let mut task = Task::new_local("done".into(), "Done".into(), None);
+                        task.status = TaskStatus::Completed;
+                        vec![task]
+                    } else {
+                        Vec::new()
+                    };
+                    let mut column = column(tasks);
+                    column.list.title = format!("List{number}");
+                    column
+                })
+                .collect();
+            for (focused, width) in [(0, 308), (8, 56), (10, 28)] {
+                app.focused = focused;
+                let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        draw(
+                            frame,
+                            frame.area(),
+                            &mut app,
+                            NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(),
+                        );
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let header: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+                let n_fit = (width / MIN_COL_WIDTH) as usize;
+                for (slot, index) in (app.col_offset..app.col_offset + n_fit).enumerate() {
+                    let number = index + 1;
+                    let expected = if number <= 9 {
+                        format!("[{number}] List{number}")
+                    } else {
+                        format!(" List{number} ")
+                    };
+                    assert!(header.contains(&expected), "{header}");
+                    if number > 9 {
+                        let start = slot as u16 * MIN_COL_WIDTH;
+                        let column_header: String = (start..start + MIN_COL_WIDTH)
+                            .map(|x| buffer[(x, 0)].symbol())
+                            .collect();
+                        assert!(!column_header.contains('['), "{column_header}");
+                    }
+                }
+                assert!(!header.contains("[10]"));
+                assert!(!header.contains("[11]"));
+                if hidden_done && width == 308 {
+                    assert!(header.contains("(1 done hidden)"));
+                }
+                assert_eq!(
+                    app.columns[focused].list.title,
+                    format!("List{}", focused + 1)
+                );
+            }
+        }
     }
 
     #[test]

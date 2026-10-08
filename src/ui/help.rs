@@ -8,6 +8,7 @@ use super::centered;
 
 const KEYS: &[(&str, &str)] = &[
     ("← → / h l", "switch task list"),
+    ("1–9", "jump to list by number (left to right)"),
     ("↑ ↓ / j k", "move between tasks and subtasks"),
     ("g / G", "first / last task"),
     ("Space", "toggle done (stays visible until you move away)"),
