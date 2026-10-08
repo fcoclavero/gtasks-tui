@@ -253,7 +253,7 @@ mod tests {
             loading: false,
             error: None,
         };
-        column.rebuild_rows(false);
+        column.rebuild_rows(false, crate::tree::SortMode::Position);
         column
     }
 
@@ -519,7 +519,7 @@ mod tests {
         completed.status = TaskStatus::Completed;
         completed.notes = Some("Appointment notes".into());
         let mut column = column(vec![normal, overdue, completed]);
-        column.rebuild_rows(true);
+        column.rebuild_rows(true, crate::tree::SortMode::Position);
         let mut terminal = Terminal::new(TestBackend::new(28, 24)).unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
 

@@ -13,7 +13,7 @@ use crate::backend::BackendError;
 use crate::browser;
 use crate::details::{DetailsAction, DetailsState};
 use crate::model::{Task, TaskList, TaskPatch, TaskStatus};
-use crate::tree::{self, Row};
+use crate::tree::{self, Row, SortMode};
 use crate::worker::{Cmd, Dispatcher, Msg, OpOutcome};
 
 const QUIT_GRACE: Duration = Duration::from_secs(2);
@@ -77,13 +77,18 @@ impl Column {
             .count()
     }
 
-    pub fn rebuild_rows(&mut self, show_completed: bool) {
+    pub fn rebuild_rows(&mut self, show_completed: bool, sort_mode: SortMode) {
         if let Some(p) = &self.pinned
             && !self.tasks.iter().any(|t| &t.id == p)
         {
             self.pinned = None;
         }
-        self.rows = tree::flatten(&self.tasks, show_completed, self.pinned.as_deref());
+        self.rows = tree::flatten(
+            &self.tasks,
+            show_completed,
+            self.pinned.as_deref(),
+            sort_mode,
+        );
         match self.selected_index() {
             Some(i) => self.last_index = i,
             None if self.rows.is_empty() => {
@@ -99,7 +104,7 @@ impl Column {
         self.list_state.select(self.selected_index());
     }
 
-    fn select_row(&mut self, index: usize, show_completed: bool) {
+    fn select_row(&mut self, index: usize, show_completed: bool, sort_mode: SortMode) {
         let Some(target) = self.rows.get(index).map(|r| r.task_id.clone()) else {
             return;
         };
@@ -108,22 +113,22 @@ impl Column {
         }
         self.selected = Some(target);
         self.last_index = index;
-        self.rebuild_rows(show_completed);
+        self.rebuild_rows(show_completed, sort_mode);
     }
 
-    fn move_by(&mut self, delta: isize, show_completed: bool) {
+    fn move_by(&mut self, delta: isize, show_completed: bool, sort_mode: SortMode) {
         if self.rows.is_empty() {
             return;
         }
         let current = self.selected_index().unwrap_or(0) as isize;
         let max = self.rows.len() as isize - 1;
         let target = (current + delta).clamp(0, max) as usize;
-        self.select_row(target, show_completed);
+        self.select_row(target, show_completed, sort_mode);
     }
 
-    fn leave(&mut self, show_completed: bool) {
+    fn leave(&mut self, show_completed: bool, sort_mode: SortMode) {
         if self.pinned.take().is_some() {
-            self.rebuild_rows(show_completed);
+            self.rebuild_rows(show_completed, sort_mode);
         }
     }
 }
@@ -196,6 +201,7 @@ pub struct App {
     pub focused: usize,
     pub col_offset: usize,
     pub show_completed: bool,
+    pub sort_mode: SortMode,
     pub mode: Mode,
     pub last_refresh: Option<DateTime<Local>>,
     pub account_hint: String,
@@ -219,6 +225,7 @@ impl App {
             focused: 0,
             col_offset: 0,
             show_completed: false,
+            sort_mode: SortMode::default(),
             mode: Mode::Normal,
             last_refresh: None,
             account_hint: account_hint(),
@@ -414,7 +421,7 @@ impl App {
                     Ok(tasks) => {
                         column.tasks = tasks;
                         column.error = None;
-                        column.rebuild_rows(show_completed);
+                        column.rebuild_rows(show_completed, self.sort_mode);
                     }
                     Err(err) => {
                         column.error = Some(err.user_message());
@@ -508,7 +515,16 @@ impl App {
                 let show = self.show_completed;
                 for column in &mut self.columns {
                     column.pinned = None;
-                    column.rebuild_rows(show);
+                    column.rebuild_rows(show, self.sort_mode);
+                }
+            }
+            KeyCode::Char('s') => {
+                self.sort_mode = match self.sort_mode {
+                    SortMode::Position => SortMode::DueDate,
+                    SortMode::DueDate => SortMode::Position,
+                };
+                for column in &mut self.columns {
+                    column.rebuild_rows(show_completed, self.sort_mode);
                 }
             }
             KeyCode::Char('n') => self.open_new_task(false),
@@ -610,16 +626,18 @@ impl App {
             return;
         }
         let show_completed = self.show_completed;
+        let sort_mode = self.sort_mode;
         if let Some(column) = self.focused_column_mut() {
-            column.leave(show_completed);
+            column.leave(show_completed, sort_mode);
         }
         self.focused = target;
     }
 
     fn move_by(&mut self, delta: isize) {
         let show_completed = self.show_completed;
+        let sort_mode = self.sort_mode;
         if let Some(column) = self.focused_column_mut() {
-            column.move_by(delta, show_completed);
+            column.move_by(delta, show_completed, sort_mode);
         }
     }
 
@@ -655,6 +673,7 @@ impl App {
         };
         let patch = TaskPatch::status(new_status);
         let show_completed = self.show_completed;
+        let sort_mode = self.sort_mode;
         if let Some(column) = self.focused_column_mut() {
             if let Some(task) = column.task_mut(&prev.id) {
                 patch.apply(task);
@@ -662,7 +681,7 @@ impl App {
             if new_status == TaskStatus::Completed && !show_completed {
                 column.pinned = Some(prev.id.clone());
             }
-            column.rebuild_rows(show_completed);
+            column.rebuild_rows(show_completed, sort_mode);
         }
         let task_id = prev.id.clone();
         let list_for_cmd = tasklist_id.clone();
@@ -692,7 +711,7 @@ impl App {
         };
         let prev = task.clone();
         patch.apply(task);
-        column.rebuild_rows(show_completed);
+        column.rebuild_rows(show_completed, self.sort_mode);
         let list_for_cmd = tasklist_id.clone();
         self.submit(tasklist_id, Op::Edit { prev }, move |op_id| Cmd::Patch {
             op_id,
@@ -757,7 +776,7 @@ impl App {
         ));
         column.selected = Some(temp_id.clone());
         column.pinned = None;
-        column.rebuild_rows(show_completed);
+        column.rebuild_rows(show_completed, self.sort_mode);
         let list_for_cmd = tasklist_id.clone();
         self.submit(tasklist_id, Op::Create { temp_id }, move |op_id| {
             Cmd::Insert {
@@ -826,7 +845,7 @@ impl App {
             .map(|r| r.task_id.clone());
         column.selected = next;
         column.pinned = None;
-        column.rebuild_rows(show_completed);
+        column.rebuild_rows(show_completed, self.sort_mode);
 
         let list_for_cmd = tasklist_id.clone();
         self.submit(
@@ -898,7 +917,7 @@ impl App {
                     Op::Toggle { .. } | Op::Edit { .. } | Op::Create { .. },
                 ) => {}
             }
-            column.rebuild_rows(show_completed);
+            column.rebuild_rows(show_completed, self.sort_mode);
         }
         if let Some(err) = failure {
             self.error(&err);
@@ -1152,6 +1171,151 @@ mod tests {
         assert!(row_ids(&app).contains(&"inbox-5".to_string()));
         app.handle(key(KeyCode::Char('c')));
         assert!(!row_ids(&app).contains(&"inbox-5".to_string()));
+    }
+
+    #[tokio::test]
+    async fn sort_toggle_reorders_all_columns_and_preserves_selection() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        let original: Vec<_> = app.columns.iter().map(|c| c.rows.clone()).collect();
+        let selected: Vec<_> = app.columns.iter().map(|c| c.selected.clone()).collect();
+        let tasks: Vec<_> = app.columns.iter().map(|c| c.tasks.clone()).collect();
+
+        app.handle(key(KeyCode::Char('s')));
+        assert_eq!(
+            app.columns[1]
+                .rows
+                .iter()
+                .map(|r| r.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["work-2", "work-2a", "work-1", "work-1b", "work-1c"]
+        );
+        for (i, column) in app.columns.iter().enumerate() {
+            assert_eq!(column.selected, selected[i]);
+            assert_eq!(column.list_state.selected(), column.selected_index());
+            assert_eq!(column.tasks, tasks[i]);
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        app.handle(key(KeyCode::Char('s')));
+        for (i, column) in app.columns.iter().enumerate() {
+            assert_eq!(column.rows, original[i]);
+            assert_eq!(column.selected, selected[i]);
+        }
+    }
+
+    #[tokio::test]
+    async fn sort_selected_before_loading_applies_to_new_columns() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let backend = Arc::new(MockBackend::seeded(Duration::ZERO, None));
+        let mut app = App::new(dispatcher(backend, tx));
+        app.handle(key(KeyCode::Char('s')));
+        app.start_refresh();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(app.sort_mode, SortMode::DueDate);
+        assert_eq!(app.columns[1].rows[0].task_id, "work-2");
+    }
+
+    #[tokio::test]
+    async fn sort_mode_and_shortcut_are_rendered_in_status_and_help() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, _rx) = loaded_app(None).await;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        for (event, expected) in [
+            (None, "sort: position"),
+            (Some(KeyCode::Char('s')), "sort: due date"),
+            (Some(KeyCode::Char('?')), "sort by position / due date"),
+        ] {
+            if let Some(event) = event {
+                app.handle(key(event));
+            }
+            terminal
+                .draw(|frame| crate::ui::draw(frame, &mut app))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains(expected), "expected {expected}");
+            assert!(text.contains("s: sort"));
+        }
+    }
+
+    #[tokio::test]
+    async fn due_sort_survives_navigation_filtering_and_refresh() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('s')));
+        app.handle(key(KeyCode::Right));
+        app.handle(key(KeyCode::Up));
+        assert_eq!(
+            app.focused_column().unwrap().selected.as_deref(),
+            Some("work-2a")
+        );
+        app.handle(key(KeyCode::Char('c')));
+        assert_eq!(row_ids(&app)[0], "work-2");
+        app.handle(key(KeyCode::Char('c')));
+        let sorted = row_ids(&app);
+
+        app.start_refresh();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(row_ids(&app), sorted);
+        assert_eq!(
+            app.focused_column().unwrap().selected.as_deref(),
+            Some("work-2a")
+        );
+    }
+
+    #[tokio::test]
+    async fn due_edit_reorders_and_failed_edit_restores_sorted_rows() {
+        for fail_every in [None, Some(1)] {
+            let (mut app, mut rx) = loaded_app(fail_every).await;
+            app.handle(key(KeyCode::Char('s')));
+            let original = row_ids(&app);
+            app.apply_edit(
+                "list-inbox".into(),
+                "inbox-1".into(),
+                TaskPatch {
+                    due: Some(Some(crate::dates::today() + chrono::Duration::days(10))),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                row_ids(&app),
+                vec!["inbox-2", "inbox-3", "inbox-1", "inbox-4", "inbox-7"]
+            );
+            assert_eq!(
+                app.focused_column().unwrap().selected.as_deref(),
+                Some("inbox-1")
+            );
+            settle(&mut app, &mut rx).await;
+            if fail_every.is_some() {
+                assert_eq!(row_ids(&app), original);
+            } else {
+                assert_eq!(row_ids(&app)[0], "inbox-2");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sorting_preserves_done_grace_until_navigation() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char(' ')));
+        app.handle(key(KeyCode::Char('s')));
+        assert_eq!(
+            app.focused_column().unwrap().pinned.as_deref(),
+            Some("inbox-1")
+        );
+        assert!(row_ids(&app).contains(&"inbox-1".to_string()));
+        app.handle(key(KeyCode::Down));
+        settle(&mut app, &mut rx).await;
+        assert!(!row_ids(&app).contains(&"inbox-1".to_string()));
     }
 
     #[tokio::test]

@@ -41,6 +41,8 @@ One column per task list. Subtasks are nested under their parent. Each row shows
 
 Completed tasks are hidden by default. The column title shows how many are hidden.
 
+Press `s` to toggle all lists between Google's position order (the default) and due-date order, earliest first, with undated tasks last. Subtasks stay under their parent and are sorted by their own dates. Tasks with the same date keep their position order. The status bar shows the active sort mode; sorting only changes the display, not Google's stored order.
+
 ## Keys
 
 | Key | Action |
@@ -51,6 +53,7 @@ Completed tasks are hidden by default. The column title shows how many are hidde
 | `Space` | Toggle done. The task stays visible until you move away, so you can undo. |
 | `Enter` | Edit title, due date, and notes. Links are shown read-only. |
 | `c` | Show / hide completed tasks |
+| `s` | Toggle position / due-date sorting |
 | `n` `N` | New task / new subtask under the selected task |
 | `D` | Delete the selected task and its subtasks, after confirmation |
 | `r` | Refresh now |

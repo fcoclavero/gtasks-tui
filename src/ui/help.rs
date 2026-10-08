@@ -13,6 +13,7 @@ const KEYS: &[(&str, &str)] = &[
     ("Space", "toggle done (stays visible until you move away)"),
     ("Enter", "edit title, due date, notes"),
     ("c", "show / hide completed tasks"),
+    ("s", "sort by position / due date"),
     ("n / N", "new task / new subtask under selection"),
     ("D", "delete selected task (asks for confirmation)"),
     ("r", "refresh now"),
