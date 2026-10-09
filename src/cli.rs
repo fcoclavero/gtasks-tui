@@ -4,7 +4,7 @@ use clap::Parser;
 
 /// Terminal UI for Google Tasks, backed by the gws CLI.
 #[derive(Parser, Debug)]
-#[command(name = "gtasks-tui", version, about)]
+#[command(name = "gws-tasks-tui", version, about)]
 pub struct Args {
     /// Seconds between background refreshes (0 disables periodic refresh).
     #[arg(long, default_value_t = 60)]

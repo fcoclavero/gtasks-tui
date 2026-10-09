@@ -1,10 +1,10 @@
-# gtasks-tui
+# gws-tasks-tui
 
 A small terminal UI for Google Tasks, written in Rust with [Ratatui](https://ratatui.rs). All Google traffic goes through the [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli), so authentication, scopes, and account switching stay in one place.
 
 ## Prerequisites
 
-- Rust 1.98 or newer (edition 2024).
+- Rust 1.98.1 or newer (edition 2024). Tested with Rust 1.98.1.
 - `gws` on your `PATH` (or pass `--gws-bin`), logged in with the Tasks scope:
 
 ```sh
@@ -17,17 +17,25 @@ Account switching works the same way it does for `gws`: set `GOOGLE_WORKSPACE_CL
 
 ## Install
 
+Once published to crates.io:
+
 ```sh
-cargo install --path .
+cargo install gws-tasks-tui --locked
+```
+
+From a local checkout:
+
+```sh
+cargo install --path . --locked
 ```
 
 ## Usage
 
 ```sh
-gtasks-tui                      # live data through gws, refresh every 60 s
-gtasks-tui --refresh-secs 30    # faster periodic refresh (0 disables it)
-gtasks-tui --mock               # seeded in-memory data, no network, no gws
-gtasks-tui --mock --mock-fail-every 2 --mock-latency-ms 400
+gws-tasks-tui                      # live data through gws, refresh every 60 s
+gws-tasks-tui --refresh-secs 30     # faster periodic refresh (0 disables it)
+gws-tasks-tui --mock                # seeded in-memory data, no network, no gws
+gws-tasks-tui --mock --mock-fail-every 2 --mock-latency-ms 400
 ```
 
 ## Layout
@@ -90,3 +98,18 @@ cargo run -- --mock
 ```
 
 `tests/fixtures/` holds recorded `gws` output shapes (with fictitious ids) used by the parser tests. Run `cargo audit` (install with `cargo install cargo-audit`) before publishing a release.
+
+## Release validation
+
+Following the [Cargo publishing guide](https://doc.rust-lang.org/cargo/reference/publishing.html#packaging-a-crate), verify that the packaged sources build before publishing:
+
+```sh
+cargo publish --dry-run --locked
+cargo package --list --locked
+```
+
+The dry run packages the crate and builds the extracted sources without uploading anything to crates.io. For uncommitted local changes, add `--allow-dirty` to the dry-run command.
+
+## License
+
+Licensed under the [MIT License](LICENSE).

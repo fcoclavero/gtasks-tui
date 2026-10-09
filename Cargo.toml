@@ -1,9 +1,11 @@
 [package]
-name = "gtasks-tui"
+name = "gws-tasks-tui"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98.1"
 description = "Terminal UI for Google Tasks, backed by the gws CLI"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/fcoclavero/gtasks-tui"
 
 [dependencies]
