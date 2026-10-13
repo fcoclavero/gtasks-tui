@@ -70,6 +70,8 @@ Press `s` to toggle all lists between Google's position order (the default) and 
 | `?` | Help |
 | `q` | Quit (waits up to 2 s for in-flight changes) |
 
+In the new-task prompt: `Tab` switches to creating a subtask under the selected task, keeping the title you have typed. The prompt names the parent; `Enter` creates the task and `Esc` cancels. If a subtask is selected, the new subtask goes under the same parent (Google Tasks supports one nesting level).
+
 In the editor: `Tab` / `Shift-Tab` move between fields, `Enter` moves to the next field (inserts a newline in Notes), `Ctrl-S` saves, `Ctrl-U` clears the due date, `Esc` cancels (twice if there are unsaved changes).
 Click **Open task in browser** at the bottom of the editor, or press `Ctrl-O`, to open the task's web link in your default browser without closing the editor or saving changes. If Google does not provide a `webViewLink`, the editor shows **Task link unavailable**.
 

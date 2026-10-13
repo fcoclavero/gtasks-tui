@@ -16,6 +16,7 @@ const KEYS: &[(&str, &str)] = &[
     ("c", "show / hide completed tasks"),
     ("s", "sort by position / due date"),
     ("n / N", "new task / new subtask under selection"),
+    ("Tab (new)", "create as subtask under selection"),
     ("D", "delete selected task (asks for confirmation)"),
     ("r", "refresh now"),
     ("?", "this help"),

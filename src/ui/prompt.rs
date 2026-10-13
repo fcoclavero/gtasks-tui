@@ -10,13 +10,22 @@ use crate::app::NewTaskState;
 pub fn draw_new_task(frame: &mut Frame, area: Rect, state: &mut NewTaskState) {
     let popup = centered(area, 70, 3);
     frame.render_widget(Clear, popup);
-    let title = match &state.parent_title {
-        Some(parent) => format!(" New subtask of: {} ", fit(parent, 40).trim_end()),
-        None => " New task (Enter to create, Esc to cancel) ".to_string(),
+    let title = match &state.parent {
+        Some(parent) => format!(
+            " New subtask of: {} ",
+            fit(state.parent_title.as_deref().unwrap_or(parent), 40).trim_end()
+        ),
+        None => " New task ".to_string(),
+    };
+    let hint = if state.parent.is_some() {
+        " Enter to create subtask, Esc to cancel "
+    } else {
+        " Enter to create, Esc to cancel | Tab to create subtask "
     };
     state.input.set_block(
         Block::bordered()
             .title(title)
+            .title_bottom(Line::from(hint).dim())
             .border_style(Style::new().fg(Color::Cyan)),
     );
     frame.render_widget(&state.input, popup);

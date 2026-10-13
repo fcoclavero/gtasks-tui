@@ -589,7 +589,8 @@ impl App {
                     self.create_task(tasklist_id, parent, title);
                 }
             }
-            KeyCode::Tab | KeyCode::BackTab => {}
+            KeyCode::Tab => self.new_task_as_subtask(),
+            KeyCode::BackTab => {}
             _ => {
                 state.input.input(key);
             }
@@ -736,35 +737,48 @@ impl App {
             return;
         }
         let tasklist_id = column.list.id.clone();
-        let mut parent = None;
-        let mut parent_title = None;
-        if as_subtask {
-            match column.selected_task() {
-                Some(selected) if selected.is_temp() => {
-                    self.info("parent is still being created, try again in a moment");
-                    return;
-                }
-                Some(selected) => {
-                    // Only one nesting level exists: a subtask's sibling goes under its parent.
-                    let parent_id = selected
-                        .parent
-                        .clone()
-                        .unwrap_or_else(|| selected.id.clone());
-                    parent_title = column.task(&parent_id).map(|t| t.title.clone());
-                    parent = Some(parent_id);
-                }
-                None => {}
-            }
+        if as_subtask && column.selected_task().is_some_and(Task::is_temp) {
+            self.info("parent is still being created, try again in a moment");
+            return;
         }
         let mut input = TextArea::default();
         input.set_cursor_line_style(ratatui::style::Style::default());
         input.set_placeholder_text("Task title");
         self.mode = Mode::NewTask(Box::new(NewTaskState {
             tasklist_id,
-            parent,
-            parent_title,
+            parent: None,
+            parent_title: None,
             input,
         }));
+        if as_subtask {
+            self.new_task_as_subtask();
+        }
+    }
+
+    fn new_task_as_subtask(&mut self) {
+        let Mode::NewTask(state) = &mut self.mode else {
+            return;
+        };
+        if state.parent.is_some() {
+            return;
+        }
+        let Some(column) = self.columns.iter().find(|c| c.list.id == state.tasklist_id) else {
+            return;
+        };
+        let Some(selected) = column.selected_task() else {
+            return;
+        };
+        if selected.is_temp() {
+            self.info("parent is still being created, try again in a moment");
+            return;
+        }
+        // Only one nesting level exists: a subtask's sibling goes under its parent.
+        let parent_id = selected
+            .parent
+            .clone()
+            .unwrap_or_else(|| selected.id.clone());
+        state.parent_title = column.task(&parent_id).map(|t| t.title.clone());
+        state.parent = Some(parent_id);
     }
 
     fn create_task(&mut self, tasklist_id: String, parent: Option<String>, title: String) {
@@ -1205,6 +1219,194 @@ mod tests {
         assert!(!is_temp_id(&selected));
         assert_eq!(column.task(&selected).unwrap().title, "New one");
         assert!(!column.tasks.iter().any(|t| t.is_temp()));
+    }
+
+    #[tokio::test]
+    async fn tab_creates_subtask_under_selection_and_preserves_title() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('n')));
+        for c in "New child".chars() {
+            app.handle(key(KeyCode::Char(c)));
+        }
+        app.handle(key(KeyCode::Tab));
+        app.handle(key(KeyCode::Tab));
+        app.handle(key(KeyCode::Char('!')));
+        let Mode::NewTask(state) = &app.mode else {
+            panic!("expected new task prompt");
+        };
+        assert_eq!(state.parent.as_deref(), Some("inbox-1"));
+        assert_eq!(state.parent_title.as_deref(), Some("Pay electricity bill"));
+        assert_eq!(state.input.lines(), &["New child!"]);
+        assert_eq!(app.pending_count(), 0);
+
+        app.handle(key(KeyCode::Enter));
+        let column = app.focused_column().unwrap();
+        let created = column.selected_task().unwrap();
+        assert!(created.is_temp());
+        assert_eq!(created.parent.as_deref(), Some("inbox-1"));
+        assert_eq!(column.rows[column.selected_index().unwrap()].depth, 1);
+        settle(&mut app, &mut rx).await;
+        let created = app.focused_column().unwrap().selected_task().unwrap();
+        assert!(!created.is_temp());
+        assert_eq!(created.parent.as_deref(), Some("inbox-1"));
+        assert_eq!(created.title, "New child!");
+    }
+
+    #[tokio::test]
+    async fn tab_on_selected_subtask_creates_sibling_under_same_parent() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Right));
+        app.handle(key(KeyCode::Down));
+        assert_eq!(
+            app.focused_column().unwrap().selected.as_deref(),
+            Some("work-1b")
+        );
+        app.handle(key(KeyCode::Char('n')));
+        app.handle(key(KeyCode::Tab));
+        let Mode::NewTask(state) = &app.mode else {
+            panic!("expected new task prompt");
+        };
+        assert_eq!(state.parent.as_deref(), Some("work-1"));
+        assert_eq!(state.parent_title.as_deref(), Some("Ship gtasks-tui"));
+        app.handle(key(KeyCode::Char('x')));
+        app.handle(key(KeyCode::Enter));
+        settle(&mut app, &mut rx).await;
+        assert_eq!(
+            app.focused_column()
+                .unwrap()
+                .selected_task()
+                .unwrap()
+                .parent
+                .as_deref(),
+            Some("work-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn tab_without_selection_keeps_new_task_top_level() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('3')));
+        app.handle(key(KeyCode::Char('n')));
+        app.handle(key(KeyCode::Char('x')));
+        app.handle(key(KeyCode::Tab));
+        let Mode::NewTask(state) = &app.mode else {
+            panic!("expected new task prompt");
+        };
+        assert!(state.parent.is_none());
+        assert!(state.parent_title.is_none());
+        assert_eq!(state.input.lines(), &["x"]);
+        app.handle(key(KeyCode::Enter));
+        settle(&mut app, &mut rx).await;
+        assert!(
+            app.focused_column()
+                .unwrap()
+                .selected_task()
+                .unwrap()
+                .parent
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn tab_rejects_temporary_parent_without_losing_title() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('n')));
+        app.handle(key(KeyCode::Char('p')));
+        app.handle(key(KeyCode::Enter));
+        app.handle(key(KeyCode::Char('n')));
+        app.handle(key(KeyCode::Char('x')));
+        app.handle(key(KeyCode::Tab));
+        let Mode::NewTask(state) = &app.mode else {
+            panic!("expected new task prompt");
+        };
+        assert!(state.parent.is_none());
+        assert_eq!(state.input.lines(), &["x"]);
+        assert_eq!(
+            app.status.as_ref().unwrap().text,
+            "parent is still being created, try again in a moment"
+        );
+
+        settle(&mut app, &mut rx).await;
+        let parent_id = app.focused_column().unwrap().selected.clone();
+        app.handle(key(KeyCode::Tab));
+        let Mode::NewTask(state) = &app.mode else {
+            panic!("expected new task prompt");
+        };
+        assert_eq!(state.parent, parent_id);
+        assert_eq!(state.parent_title.as_deref(), Some("p"));
+        assert_eq!(state.input.lines(), &["x"]);
+    }
+
+    #[tokio::test]
+    async fn failed_tab_subtask_creation_removes_optimistic_child() {
+        let (mut app, mut rx) = loaded_app(Some(1)).await;
+        let original = row_ids(&app);
+        app.handle(key(KeyCode::Char('n')));
+        app.handle(key(KeyCode::Tab));
+        app.handle(key(KeyCode::Char('x')));
+        app.handle(key(KeyCode::Enter));
+        assert!(
+            app.focused_column()
+                .unwrap()
+                .selected_task()
+                .unwrap()
+                .is_temp()
+        );
+        settle(&mut app, &mut rx).await;
+        assert_eq!(row_ids(&app), original);
+        assert_eq!(app.status.as_ref().unwrap().level, Level::Error);
+    }
+
+    #[tokio::test]
+    async fn tab_subtask_cancel_and_empty_title_do_not_create_tasks() {
+        for exit in [KeyCode::Esc, KeyCode::Enter] {
+            let (mut app, _rx) = loaded_app(None).await;
+            let original = app.focused_column().unwrap().tasks.clone();
+            app.handle(key(KeyCode::Char('n')));
+            app.handle(key(KeyCode::Tab));
+            app.handle(key(exit));
+            assert!(matches!(app.mode, Mode::Normal));
+            assert_eq!(app.pending_count(), 0);
+            assert_eq!(app.focused_column().unwrap().tasks, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn new_task_prompt_renders_tab_hint_and_selected_parent() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, _rx) = loaded_app(None).await;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        app.handle(key(KeyCode::Char('n')));
+        for (event, expected, absent) in [
+            (None, "Tab to create subtask", "New subtask of:"),
+            (
+                Some(KeyCode::Tab),
+                "New subtask of: Pay electricity bill",
+                "Tab to create subtask",
+            ),
+        ] {
+            if let Some(event) = event {
+                app.handle(key(event));
+            }
+            terminal
+                .draw(|frame| crate::ui::draw(frame, &mut app))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains(expected), "expected {expected}");
+            assert!(!text.contains(absent), "unexpected {absent}");
+            assert!(text.contains("Esc to cancel"));
+            if event.is_some() {
+                assert!(text.contains("Enter to create subtask"));
+            }
+        }
     }
 
     #[tokio::test]
