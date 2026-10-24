@@ -83,9 +83,9 @@ fn draw_column(
     } else {
         format!(" {}", column.list.title)
     };
-    let hidden = column.hidden_done_count();
-    if hidden > 0 {
-        title.push_str(&format!(" ({hidden} done hidden)"));
+    // An unloaded or failed column has no meaningful count yet.
+    if !column.tasks.is_empty() || (!column.loading && column.error.is_none()) {
+        title.push_str(&format!(" ({})", column.active_count()));
     }
     title.push(' ');
     let border_style = if focused {
@@ -99,6 +99,10 @@ fn draw_column(
     let mut block = Block::bordered().title(title).border_style(border_style);
     if more_right {
         block = block.title_top(Line::from(" ▶ ").right_aligned());
+    }
+    let hidden = column.hidden_done_count();
+    if hidden > 0 {
+        block = block.title_bottom(Line::from(format!(" {hidden} done hidden ")).dim());
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -336,8 +340,10 @@ mod tests {
                 }
                 assert!(!header.contains("[10]"));
                 assert!(!header.contains("[11]"));
-                if hidden_done && width == 308 {
-                    assert!(header.contains("(1 done hidden)"));
+                if width == 308 {
+                    assert!(header.contains("[1] List1 (0) "), "{header}");
+                    let footer: String = (0..width).map(|x| buffer[(x, 7)].symbol()).collect();
+                    assert_eq!(footer.contains(" 1 done hidden "), hidden_done, "{footer}");
                 }
                 assert_eq!(
                     app.columns[focused].list.title,

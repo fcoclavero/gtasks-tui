@@ -68,6 +68,14 @@ impl Column {
         self.task(self.selected.as_deref()?)
     }
 
+    /// Open (not completed) tasks, subtasks included.
+    pub fn active_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|t| !t.is_completed() && !t.deleted)
+            .count()
+    }
+
     /// Completed tasks currently filtered out of `rows` (a pinned task is not hidden).
     pub fn hidden_done_count(&self) -> usize {
         self.tasks

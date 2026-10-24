@@ -48,7 +48,7 @@ The first nine columns are numbered left to right, with `[1]`–`[9]` prefixes i
 - White: everything else.
 - Dimmed: a completed parent that is only shown because one of its subtasks is visible.
 
-Completed tasks are hidden by default. The column title shows how many are hidden.
+Completed tasks are hidden by default. The column title shows the number of open tasks, and the bottom border shows how many completed tasks are hidden.
 
 Press `s` to toggle all lists between Google's position order (the default) and due-date order, earliest first, with undated tasks last. Subtasks stay under their parent and are sorted by their own dates. Tasks with the same date keep their position order. The status bar shows the active sort mode; sorting only changes the display, not Google's stored order.
 
