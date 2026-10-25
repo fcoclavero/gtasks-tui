@@ -5,14 +5,19 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 use ratatui_textarea::TextArea;
 
 use crate::backend::BackendError;
 use crate::browser;
-use crate::details::{DetailsAction, DetailsState};
+use crate::clipboard;
+use crate::details::{DetailsAction, DetailsState, Field};
 use crate::model::{Task, TaskList, TaskPatch, TaskStatus};
+use crate::text_input;
 use crate::tree::{self, Row, SortMode};
 use crate::worker::{Cmd, Dispatcher, Msg, OpOutcome};
 
@@ -34,6 +39,10 @@ pub struct Column {
     pub pinned: Option<String>,
     pub loading: bool,
     pub error: Option<String>,
+    /// Screen rect from the last draw (empty when off-screen), for mouse hit-testing.
+    pub area: Rect,
+    /// Rendered rows from the last draw as `(row index, top y, height)`.
+    pub visible_rows: Vec<(usize, u16, u16)>,
 }
 
 impl Column {
@@ -48,6 +57,8 @@ impl Column {
             pinned: None,
             loading: true,
             error: None,
+            area: Rect::default(),
+            visible_rows: Vec::new(),
         }
     }
 
@@ -112,6 +123,13 @@ impl Column {
         self.list_state.select(self.selected_index());
     }
 
+    fn row_at(&self, y: u16) -> Option<usize> {
+        self.visible_rows
+            .iter()
+            .find(|&&(_, top, height)| (top..top + height).contains(&y))
+            .map(|&(index, ..)| index)
+    }
+
     fn select_row(&mut self, index: usize, show_completed: bool, sort_mode: SortMode) {
         let Some(target) = self.rows.get(index).map(|r| r.task_id.clone()) else {
             return;
@@ -146,6 +164,9 @@ pub struct NewTaskState {
     pub parent: Option<String>,
     pub parent_title: Option<String>,
     pub input: TextArea<'static>,
+    /// Input rect from the last draw, for mouse hit-testing.
+    pub area: Rect,
+    dragging: bool,
 }
 
 pub enum Mode {
@@ -490,9 +511,24 @@ impl App {
     // ----- key handling -----------------------------------------------------
 
     fn on_key(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.should_quit = true;
-            return;
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'x'))
+        {
+            let selection = self.editable_text_mut().and_then(|area| {
+                if key.code == KeyCode::Char('c') {
+                    text_input::copy_selection(area)
+                } else {
+                    text_input::cut_selection(area)
+                }
+            });
+            if let Some(text) = selection {
+                self.copy_to_clipboard(&text);
+                return;
+            }
+            if key.code == KeyCode::Char('c') {
+                self.should_quit = true;
+                return;
+            }
         }
         match &mut self.mode {
             Mode::Normal => self.on_key_normal(key),
@@ -552,10 +588,60 @@ impl App {
         self.on_details_action(action);
     }
 
+    /// The free-text field that has keyboard focus, if any.
+    fn editable_text_mut(&mut self) -> Option<&mut TextArea<'static>> {
+        match &mut self.mode {
+            Mode::Details(details) => match details.focus {
+                Field::Title => Some(&mut details.title),
+                Field::Notes => Some(&mut details.notes),
+                Field::Due => None,
+            },
+            Mode::NewTask(state) => Some(&mut state.input),
+            _ => None,
+        }
+    }
+
+    fn copy_to_clipboard(&mut self, text: &str) {
+        match clipboard::copy(text) {
+            Ok(()) => self.info(format!("copied {} characters", text.chars().count())),
+            Err(err) => self.set_status(Level::Error, err),
+        }
+    }
+
     fn on_mouse(&mut self, mouse: MouseEvent) {
-        if let Mode::Details(details) = &self.mode {
-            let action = details.handle_mouse(mouse);
-            self.on_details_action(action);
+        match &mut self.mode {
+            Mode::Details(details) => {
+                let action = details.handle_mouse(mouse);
+                self.on_details_action(action);
+            }
+            Mode::NewTask(state) => {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    state.dragging = state.area.contains(Position::new(mouse.column, mouse.row));
+                }
+                if state.dragging {
+                    text_input::mouse(&mut state.input, state.area, mouse);
+                }
+                if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                    state.dragging = false;
+                }
+            }
+            Mode::Normal if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                self.click_task(Position::new(mouse.column, mouse.row));
+            }
+            _ => {}
+        }
+    }
+
+    /// Focus the clicked column and select the clicked task, if any.
+    fn click_task(&mut self, position: Position) {
+        let Some(index) = self.columns.iter().position(|c| c.area.contains(position)) else {
+            return;
+        };
+        self.focus_column(index);
+        let (show_completed, sort_mode) = (self.show_completed, self.sort_mode);
+        let column = &mut self.columns[index];
+        if let Some(row) = column.row_at(position.y) {
+            column.select_row(row, show_completed, sort_mode);
         }
     }
 
@@ -600,7 +686,7 @@ impl App {
             KeyCode::Tab => self.new_task_as_subtask(),
             KeyCode::BackTab => {}
             _ => {
-                state.input.input(key);
+                text_input::input(&mut state.input, key);
             }
         }
     }
@@ -757,6 +843,8 @@ impl App {
             parent: None,
             parent_title: None,
             input,
+            area: Rect::default(),
+            dragging: false,
         }));
         if as_subtask {
             self.new_task_as_subtask();
@@ -1641,5 +1729,193 @@ mod tests {
         settle(&mut app, &mut rx).await;
         app.tick_quit();
         assert!(app.should_quit);
+    }
+
+    fn draw(app: &mut App) -> ratatui::buffer::Buffer {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn find(buffer: &ratatui::buffer::Buffer, text: &str) -> Position {
+        let area = buffer.area;
+        for y in 0..area.height {
+            let line: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            if let Some(byte) = line.find(text) {
+                return Position::new(line[..byte].chars().count() as u16, y);
+            }
+        }
+        panic!("{text:?} not on screen");
+    }
+
+    fn left(kind: fn(MouseButton) -> MouseEventKind, at: Position) -> Msg {
+        Msg::Input(Event::Mouse(MouseEvent {
+            kind: kind(MouseButton::Left),
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        }))
+    }
+
+    fn selected_title(app: &App) -> Option<String> {
+        app.focused_column()?
+            .selected_task()
+            .map(|task| task.title.clone())
+    }
+
+    #[tokio::test]
+    async fn clicking_a_task_focuses_its_column_and_selects_it() {
+        let (mut app, _rx) = loaded_app(None).await;
+        let buffer = draw(&mut app);
+        for (title, column) in [
+            ("Collect metrics", 1),
+            ("Implement the TUI", 1),
+            ("Think about the weekend", 0),
+        ] {
+            app.handle(left(MouseEventKind::Down, find(&buffer, title)));
+            assert_eq!(app.focused, column, "{title}");
+            assert_eq!(selected_title(&app).as_deref(), Some(title));
+        }
+        // The second line of a wrapped or two-line row selects the same task.
+        let notes_marker = find(&buffer, "≡");
+        app.handle(left(MouseEventKind::Down, notes_marker));
+        assert_eq!(
+            selected_title(&app).as_deref(),
+            Some("Read the ratatui book")
+        );
+        // Empty space and borders only focus the column; other buttons do nothing.
+        let empty = find(&buffer, "(empty)");
+        app.handle(left(
+            MouseEventKind::Down,
+            Position::new(empty.x, empty.y + 5),
+        ));
+        assert_eq!(app.focused, 2);
+        assert_eq!(selected_title(&app), None);
+        let before = app.focused;
+        app.handle(Msg::Input(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 1,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        })));
+        assert_eq!(app.focused, before);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_copies_or_cuts_selected_text_and_quits_without_a_selection() {
+        let (mut app, _rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Enter));
+        let shift_alt_left = Msg::Input(Event::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::SHIFT | KeyModifiers::ALT,
+        )));
+        app.handle(shift_alt_left);
+        let ctrl = |c| {
+            Msg::Input(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::CONTROL,
+            )))
+        };
+        app.handle(ctrl('c'));
+        app.handle(ctrl('x'));
+        assert!(!app.should_quit);
+        let Mode::Details(details) = &app.mode else {
+            panic!("copying must keep the editor open");
+        };
+        assert_eq!(details.title_text(), "Pay electricity");
+        assert_eq!(app.status.as_ref().unwrap().text, "copied 4 characters");
+        clipboard::COPIED.with(|copied| assert_eq!(*copied.borrow(), ["bill", "bill"]));
+        app.handle(ctrl('c'));
+        assert!(app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn mouse_focuses_editor_fields_and_drag_selects_text_to_copy() {
+        let (mut app, _rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Enter));
+        draw(&mut app);
+        let Mode::Details(details) = &app.mode else {
+            panic!("expected details editor");
+        };
+        // Text starts inside each field's border.
+        let due = Position::new(details.due_area.x + 1, details.due_area.y + 1);
+        let title = Position::new(details.title_area.x + 1, details.title_area.y + 1);
+        app.handle(left(MouseEventKind::Down, Position::new(due.x + 4, due.y)));
+        let Mode::Details(details) = &app.mode else {
+            panic!("expected details editor");
+        };
+        assert_eq!(details.focus, Field::Due);
+        // The separator snaps to the nearest digit slot.
+        assert!([3, 5].contains(&details.due.area.cursor().1));
+
+        app.handle(left(
+            MouseEventKind::Down,
+            Position::new(title.x + 4, title.y),
+        ));
+        app.handle(left(
+            MouseEventKind::Drag,
+            Position::new(title.x + 15, title.y),
+        ));
+        // Leaving the field mid-drag clamps instead of switching fields.
+        app.handle(left(
+            MouseEventKind::Drag,
+            Position::new(title.x + 15, title.y + 4),
+        ));
+        app.handle(left(
+            MouseEventKind::Drag,
+            Position::new(title.x + 15, title.y),
+        ));
+        app.handle(left(
+            MouseEventKind::Up,
+            Position::new(title.x + 15, title.y),
+        ));
+        let Mode::Details(details) = &app.mode else {
+            panic!("expected details editor");
+        };
+        assert_eq!(details.focus, Field::Title);
+        app.handle(Msg::Input(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))));
+        clipboard::COPIED.with(|copied| assert_eq!(*copied.borrow(), ["electricity"]));
+        assert!(!app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn new_task_input_supports_word_movement_and_mouse_selection() {
+        let (mut app, _rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('n')));
+        for c in "buy oat milk".chars() {
+            app.handle(key(KeyCode::Char(c)));
+        }
+        app.handle(Msg::Input(Event::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::ALT,
+        ))));
+        app.handle(key(KeyCode::Char('x')));
+        let buffer = draw(&mut app);
+        let text = find(&buffer, "buy oat xmilk");
+        app.handle(left(MouseEventKind::Down, text));
+        app.handle(left(
+            MouseEventKind::Drag,
+            Position::new(text.x + 3, text.y),
+        ));
+        app.handle(Msg::Input(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))));
+        clipboard::COPIED.with(|copied| assert_eq!(*copied.borrow(), ["buy"]));
+        // A press outside the input does not start a selection there.
+        app.handle(left(MouseEventKind::Down, Position::new(0, 0)));
+        app.handle(left(
+            MouseEventKind::Drag,
+            Position::new(text.x + 5, text.y),
+        ));
+        let Mode::NewTask(state) = &app.mode else {
+            panic!("expected new task prompt");
+        };
+        assert_eq!(state.input.lines(), ["buy oat xmilk"]);
+        assert_eq!(state.input.cursor(), (0, 3));
     }
 }

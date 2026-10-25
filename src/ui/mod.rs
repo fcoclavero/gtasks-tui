@@ -1,5 +1,6 @@
 //! Rendering. Nothing here mutates app data except ratatui `ListState`
-//! offsets and the column window offset.
+//! offsets, the column window offset, and the screen rects recorded for
+//! mouse hit-testing.
 
 mod columns;
 mod details;

@@ -8,6 +8,7 @@ use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 use crate::dates;
 use crate::due_input::DueInput;
 use crate::model::{Task, TaskPatch};
+use crate::text_input;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
@@ -53,6 +54,12 @@ pub struct DetailsState {
     pub error: Option<(Field, String)>,
     pub confirm_discard: bool,
     pub task_link_area: Rect,
+    /// Field rects from the last draw, for mouse hit-testing.
+    pub title_area: Rect,
+    pub due_area: Rect,
+    pub notes_area: Rect,
+    /// The field a left-button drag started in.
+    drag: Option<Field>,
 }
 
 fn single_line(text: &str) -> TextArea<'static> {
@@ -89,6 +96,10 @@ impl DetailsState {
             error: None,
             confirm_discard: false,
             task_link_area: Rect::default(),
+            title_area: Rect::default(),
+            due_area: Rect::default(),
+            notes_area: Rect::default(),
+            drag: None,
         }
     }
 
@@ -117,16 +128,51 @@ impl DetailsState {
             .unwrap_or(DetailsAction::Continue)
     }
 
-    pub fn handle_mouse(&self, mouse: MouseEvent) -> DetailsAction {
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && self
-                .task_link_area
-                .contains(Position::new(mouse.column, mouse.row))
-        {
-            self.open_task_link()
-        } else {
-            DetailsAction::Continue
+    fn field_at(&self, position: Position) -> Option<Field> {
+        [
+            (Field::Title, self.title_area),
+            (Field::Due, self.due_area),
+            (Field::Notes, self.notes_area),
+        ]
+        .into_iter()
+        .find(|(_, area)| area.contains(position))
+        .map(|(field, _)| field)
+    }
+
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> DetailsAction {
+        let position = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.task_link_area.contains(position) {
+                    return self.open_task_link();
+                }
+                self.drag = self.field_at(position);
+                if let Some(field) = self.drag {
+                    self.focus = field;
+                    self.confirm_discard = false;
+                }
+            }
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                if self.notes_area.contains(position) =>
+            {
+                self.notes.input(mouse);
+                return DetailsAction::Continue;
+            }
+            _ => {}
         }
+        match self.drag {
+            Some(Field::Title) => text_input::mouse(&mut self.title, self.title_area, mouse),
+            Some(Field::Notes) => text_input::mouse(&mut self.notes, self.notes_area, mouse),
+            Some(Field::Due) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                let column = text_input::text_column(&self.due.area, self.due_area, mouse.column);
+                self.due.click(column);
+            }
+            Some(Field::Due) | None => {}
+        }
+        if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+            self.drag = None;
+        }
+        DetailsAction::Continue
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -206,11 +252,11 @@ impl DetailsState {
                 }
                 match self.focus {
                     Field::Title => {
-                        self.title.input(key);
+                        text_input::input(&mut self.title, key);
                     }
                     Field::Due => self.due.handle_key(key),
                     Field::Notes => {
-                        self.notes.input(key);
+                        text_input::input(&mut self.notes, key);
                     }
                 }
                 DetailsAction::Continue

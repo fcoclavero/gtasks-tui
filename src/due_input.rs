@@ -36,6 +36,21 @@ impl DueInput {
         self.set_text(EMPTY_DATE, 0);
     }
 
+    /// Move the cursor to the clicked text column, snapping to the nearest
+    /// digit slot while the numeric mask is shown.
+    pub fn click(&mut self, column: usize) {
+        let column = if self.is_masked() {
+            DIGITS
+                .iter()
+                .copied()
+                .min_by_key(|&i| i.abs_diff(column))
+                .unwrap_or(0)
+        } else {
+            column.min(self.area.lines()[0].chars().count())
+        };
+        self.area.move_cursor(CursorMove::Jump(0, column as u16));
+    }
+
     fn is_masked(&self) -> bool {
         let text = &self.area.lines()[0];
         text.len() == 10

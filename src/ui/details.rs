@@ -55,9 +55,12 @@ pub fn draw(frame: &mut Frame, area: Rect, details: &mut DetailsState) {
         error_field == Some(Field::Due),
     );
     style_field(&mut details.notes, " Notes ", focus == Field::Notes, false);
+    details.title_area = title_area;
+    details.notes_area = notes_area;
     frame.render_widget(&details.title, title_area);
     let [due_input_area, preview_area] =
         Layout::vertical([Constraint::Length(3), Constraint::Length(1)]).areas(due_area);
+    details.due_area = due_input_area;
     frame.render_widget(&details.due.area, due_input_area);
     let preview = match details.due.resolve() {
         Ok(Some(date)) => {

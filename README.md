@@ -59,6 +59,7 @@ Press `s` to toggle all lists between Google's position order (the default) and 
 | `←` `→` `h` `l` | Switch task list |
 | `1`–`9` | Jump to the corresponding task list, numbered left to right |
 | `↑` `↓` `j` `k` | Move between tasks and subtasks |
+| Click | Focus that task list and select the clicked task |
 | `g` `G` | First / last task |
 | `Space` | Toggle done. The task stays visible until you move away, so you can undo. |
 | `Enter` | Edit title, due date, and notes. Links are shown read-only. |
@@ -73,6 +74,7 @@ Press `s` to toggle all lists between Google's position order (the default) and 
 In the new-task prompt: `Tab` switches to creating a subtask under the selected task, keeping the title you have typed. The prompt names the parent; `Enter` creates the task and `Esc` cancels. If a subtask is selected, the new subtask goes under the same parent (Google Tasks supports one nesting level).
 
 In the editor: `Tab` / `Shift-Tab` move between fields, `Enter` moves to the next field (inserts a newline in Notes), `Ctrl-S` saves, `Ctrl-U` clears the due date, `Esc` cancels (twice if there are unsaved changes).
+In any text field (task titles, notes, and the new-task prompt): `Alt-←` / `Alt-→` (Option on macOS) or `Ctrl-←` / `Ctrl-→` move by word, and adding `Shift` selects. Click to place the cursor, or drag to select. `Ctrl-C` copies the selection to the system clipboard and `Ctrl-X` cuts it. Without a selection, `Ctrl-C` quits as usual. Copying uses `pbcopy`, `wl-copy`, `xclip`, or `xsel`, whichever is installed. If none is, the app sends an OSC 52 escape so the terminal sets the clipboard.
 Click **Open task in browser** at the bottom of the editor, or press `Ctrl-O`, to open the task's web link in your default browser without closing the editor or saving changes. If Google does not provide a `webViewLink`, the editor shows **Task link unavailable**.
 
 ### Due-date input

@@ -28,6 +28,7 @@ pub fn draw_new_task(frame: &mut Frame, area: Rect, state: &mut NewTaskState) {
             .title_bottom(Line::from(hint).dim())
             .border_style(Style::new().fg(Color::Cyan)),
     );
+    state.area = popup;
     frame.render_widget(&state.input, popup);
 }
 
