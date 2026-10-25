@@ -10,7 +10,7 @@ const KEYS: &[(&str, &str)] = &[
     ("← → / h l", "switch task list"),
     ("1–9", "jump to list by number (left to right)"),
     ("↑ ↓ / j k", "move between tasks and subtasks"),
-    ("click", "select a task (and focus its list)"),
+    ("click / 2×", "select a task / open it in the editor"),
     ("g / G", "first / last task"),
     ("Space", "toggle done (stays visible until you move away)"),
     ("Enter", "edit title, due date, notes"),

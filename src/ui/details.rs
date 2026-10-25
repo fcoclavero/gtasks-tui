@@ -15,6 +15,7 @@ pub fn draw(frame: &mut Frame, area: Rect, details: &mut DetailsState) {
         (area.height * 9 / 10).clamp(14, 36),
     );
     frame.render_widget(Clear, popup);
+    details.popup_area = popup;
     let heading = format!(" Task: {} ", fit(&details.original.title, 40).trim_end());
     let block = Block::bordered()
         .title(heading)
@@ -98,7 +99,8 @@ pub fn draw(frame: &mut Frame, area: Rect, details: &mut DetailsState) {
     let footer = if let Some((_, err)) = &details.error {
         Line::from(err.as_str()).red()
     } else if details.confirm_discard {
-        Line::from("Unsaved changes: Esc again to discard, Ctrl-S to save").yellow()
+        Line::from("Unsaved changes: Esc or click outside again to discard, Ctrl-S to save")
+            .yellow()
     } else if focus == Field::Due {
         Line::from("←/→ segment · ↑/↓ adjust · Shift ↑/↓ week (day) · Ctrl-U clear · Ctrl-S save")
             .dim()

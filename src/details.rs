@@ -54,7 +54,8 @@ pub struct DetailsState {
     pub error: Option<(Field, String)>,
     pub confirm_discard: bool,
     pub task_link_area: Rect,
-    /// Field rects from the last draw, for mouse hit-testing.
+    /// Rects from the last draw, for mouse hit-testing.
+    pub popup_area: Rect,
     pub title_area: Rect,
     pub due_area: Rect,
     pub notes_area: Rect,
@@ -96,6 +97,7 @@ impl DetailsState {
             error: None,
             confirm_discard: false,
             task_link_area: Rect::default(),
+            popup_area: Rect::default(),
             title_area: Rect::default(),
             due_area: Rect::default(),
             notes_area: Rect::default(),
@@ -145,6 +147,11 @@ impl DetailsState {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.task_link_area.contains(position) {
                     return self.open_task_link();
+                }
+                // Clicking outside behaves like Esc. Before the first draw there is no popup yet.
+                if !self.popup_area.is_empty() && !self.popup_area.contains(position) {
+                    self.drag = None;
+                    return self.cancel();
                 }
                 self.drag = self.field_at(position);
                 if let Some(field) = self.drag {
@@ -206,17 +213,20 @@ impl DetailsState {
         Ok(patch)
     }
 
+    /// Close, asking for confirmation first when there are unsaved changes.
+    fn cancel(&mut self) -> DetailsAction {
+        if !self.is_dirty() || self.confirm_discard {
+            return DetailsAction::Cancel;
+        }
+        self.confirm_discard = true;
+        DetailsAction::Continue
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> DetailsAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('o') if ctrl => self.open_task_link(),
-            KeyCode::Esc => {
-                if !self.is_dirty() || self.confirm_discard {
-                    return DetailsAction::Cancel;
-                }
-                self.confirm_discard = true;
-                DetailsAction::Continue
-            }
+            KeyCode::Esc => self.cancel(),
             KeyCode::Char('s') if ctrl => match self.build_patch() {
                 Ok(patch) => DetailsAction::Save(patch),
                 Err(err) => {

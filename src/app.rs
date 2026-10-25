@@ -24,6 +24,8 @@ use crate::worker::{Cmd, Dispatcher, Msg, OpOutcome};
 const QUIT_GRACE: Duration = Duration::from_secs(2);
 const INFO_TTL: Duration = Duration::from_secs(5);
 const ERROR_TTL: Duration = Duration::from_secs(30);
+/// Two presses on the same task within this window open it.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 pub struct Column {
     pub list: TaskList,
@@ -244,6 +246,8 @@ pub struct App {
     lists_in_flight: usize,
     dirty_lists: HashSet<String>,
     quit_deadline: Option<Instant>,
+    /// The last task press, for double-click detection: when, list index, task id.
+    last_click: Option<(Instant, usize, String)>,
     dispatch: Dispatcher,
 }
 
@@ -268,6 +272,7 @@ impl App {
             lists_in_flight: 0,
             dirty_lists: HashSet::new(),
             quit_deadline: None,
+            last_click: None,
             dispatch,
         }
     }
@@ -632,16 +637,32 @@ impl App {
         }
     }
 
-    /// Focus the clicked column and select the clicked task, if any.
+    /// Focus the clicked column and select the clicked task, if any. A second
+    /// press on the same task within `DOUBLE_CLICK` opens it.
     fn click_task(&mut self, position: Position) {
+        let previous = self.last_click.take();
         let Some(index) = self.columns.iter().position(|c| c.area.contains(position)) else {
             return;
         };
         self.focus_column(index);
         let (show_completed, sort_mode) = (self.show_completed, self.sort_mode);
         let column = &mut self.columns[index];
-        if let Some(row) = column.row_at(position.y) {
-            column.select_row(row, show_completed, sort_mode);
+        let Some(row) = column.row_at(position.y) else {
+            return;
+        };
+        column.select_row(row, show_completed, sort_mode);
+        // Selecting can rebuild the rows (dropping a pinned task), so read the id back.
+        let Some(task_id) = column.selected.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        let double = previous.is_some_and(|(at, list, id)| {
+            list == index && id == task_id && now.duration_since(at) <= DOUBLE_CLICK
+        });
+        if double {
+            self.open_details();
+        } else {
+            self.last_click = Some((now, index, task_id));
         }
     }
 
@@ -1917,5 +1938,62 @@ mod tests {
         };
         assert_eq!(state.input.lines(), ["buy oat xmilk"]);
         assert_eq!(state.input.cursor(), (0, 3));
+    }
+
+    #[tokio::test]
+    async fn double_clicking_a_task_opens_it() {
+        let (mut app, _rx) = loaded_app(None).await;
+        let buffer = draw(&mut app);
+        let metrics = find(&buffer, "Collect metrics");
+        let dentist = find(&buffer, "Call the dentist");
+        let opened = |app: &App| match &app.mode {
+            Mode::Details(details) => Some(details.original.title.clone()),
+            _ => None,
+        };
+
+        // Presses on different tasks, or too far apart, only select.
+        app.handle(left(MouseEventKind::Down, dentist));
+        app.handle(left(MouseEventKind::Down, metrics));
+        assert_eq!(opened(&app), None);
+        app.last_click.as_mut().unwrap().0 -= DOUBLE_CLICK * 2;
+        app.handle(left(MouseEventKind::Down, metrics));
+        assert_eq!(opened(&app), None);
+        assert_eq!(selected_title(&app).as_deref(), Some("Collect metrics"));
+
+        app.handle(left(MouseEventKind::Down, metrics));
+        assert_eq!(opened(&app).as_deref(), Some("Collect metrics"));
+        // A third press is not a new double-click on the list behind the editor.
+        app.handle(Msg::Input(Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))));
+        app.handle(left(MouseEventKind::Down, metrics));
+        assert_eq!(opened(&app), None);
+    }
+
+    #[tokio::test]
+    async fn clicking_outside_the_editor_closes_it_like_esc() {
+        let (mut app, _rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Enter));
+        let outside = Position::new(0, 0);
+        draw(&mut app);
+        app.handle(left(MouseEventKind::Down, outside));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        app.handle(key(KeyCode::Enter));
+        app.handle(key(KeyCode::Char('!')));
+        draw(&mut app);
+        let Mode::Details(details) = &app.mode else {
+            panic!("expected details editor");
+        };
+        let inside = Position::new(details.popup_area.x + 2, details.popup_area.y);
+        // Unsaved changes need a second click, and clicking inside keeps editing.
+        app.handle(left(MouseEventKind::Down, outside));
+        assert!(matches!(&app.mode, Mode::Details(d) if d.confirm_discard));
+        app.handle(left(MouseEventKind::Down, inside));
+        assert!(matches!(&app.mode, Mode::Details(d) if d.confirm_discard));
+        app.handle(left(MouseEventKind::Down, outside));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.pending_count(), 0);
     }
 }
