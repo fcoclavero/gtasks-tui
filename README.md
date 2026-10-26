@@ -66,7 +66,7 @@ Press `s` to toggle all lists between Google's position order (the default) and 
 | `c` | Show / hide completed tasks |
 | `s` | Toggle position / due-date sorting |
 | `n` `N` | New task / new subtask under the selected task |
-| `D` | Delete the selected task and its subtasks, after confirmation |
+| `d` `D` | Delete the selected task and its subtasks, after confirmation |
 | `r` | Refresh now |
 | `?` | Help |
 | `q` | Quit (waits up to 2 s for in-flight changes) |

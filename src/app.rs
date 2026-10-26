@@ -579,7 +579,7 @@ impl App {
             }
             KeyCode::Char('n') => self.open_new_task(false),
             KeyCode::Char('N') => self.open_new_task(true),
-            KeyCode::Char('D') => self.open_confirm_delete(),
+            KeyCode::Char('d' | 'D') => self.open_confirm_delete(),
             KeyCode::Char('r') => self.start_refresh(),
             _ => {}
         }
@@ -1549,7 +1549,7 @@ mod tests {
             app.focused_column().unwrap().selected.as_deref(),
             Some("work-1")
         );
-        app.handle(key(KeyCode::Char('D')));
+        app.handle(key(KeyCode::Char('d')));
         match &app.mode {
             Mode::ConfirmDelete { subtask_count, .. } => assert_eq!(*subtask_count, 4),
             _ => panic!("expected confirm prompt"),
