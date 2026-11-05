@@ -15,6 +15,12 @@ use crate::tree::Row;
 pub const MIN_COL_WIDTH: u16 = 28;
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App, today: NaiveDate) {
+    // Off-screen columns, and every column when none can be drawn, take no mouse input.
+    for column in &mut app.columns {
+        column.area = Rect::default();
+        column.list_area = Rect::default();
+        column.row_heights.clear();
+    }
     if area.width < 20 || area.height < 3 {
         frame.render_widget(
             Paragraph::new("terminal too small").alignment(Alignment::Center),
@@ -51,10 +57,6 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App, today: NaiveDate) {
     let more_left = first > 0;
     let more_right = last < app.columns.len();
     let rects = Layout::horizontal(vec![Constraint::Fill(1); n_fit]).split(area);
-    for column in &mut app.columns {
-        column.area = Rect::default();
-        column.visible_rows.clear();
-    }
     let focused = app.focused;
 
     for (slot, index) in (first..last).enumerate() {
@@ -111,7 +113,8 @@ fn draw_column(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     column.area = area;
-    column.visible_rows.clear();
+    column.list_area = Rect::default();
+    column.row_heights.clear();
 
     if column.rows.is_empty() {
         let text = if let Some(err) = &column.error {
@@ -170,21 +173,11 @@ fn draw_column(
     } else {
         Style::new().add_modifier(Modifier::BOLD)
     };
-    let heights: Vec<u16> = items.iter().map(|item| item.height() as u16).collect();
+    column.row_heights = items.iter().map(|item| item.height() as u16).collect();
+    column.list_area = inner;
     let list = List::new(items).highlight_style(highlight);
     column.list_state.select(column.selected_index());
     frame.render_stateful_widget(list, inner, &mut column.list_state);
-
-    let mut top = inner.y;
-    for (index, &height) in heights.iter().enumerate().skip(column.list_state.offset()) {
-        if top >= inner.bottom() {
-            break;
-        }
-        column
-            .visible_rows
-            .push((index, top, height.min(inner.bottom() - top)));
-        top += height;
-    }
 }
 
 fn row_marker(row: &Row) -> &'static str {
@@ -282,7 +275,8 @@ mod tests {
             loading: false,
             error: None,
             area: Rect::default(),
-            visible_rows: Vec::new(),
+            list_area: Rect::default(),
+            row_heights: Vec::new(),
         };
         column.rebuild_rows(false, crate::tree::SortMode::Position);
         column

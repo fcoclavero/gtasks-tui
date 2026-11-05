@@ -60,6 +60,7 @@ Press `s` to toggle all lists between Google's position order (the default) and 
 | `1`–`9` | Jump to the corresponding task list, numbered left to right |
 | `↑` `↓` `j` `k` | Move between tasks and subtasks |
 | Click / double-click | Select the clicked task (focusing its list) / open it in the editor |
+| Scroll wheel / trackpad | Scroll the list under the pointer without changing focus. The selection stays put until it would leave the screen, then moves with it. |
 | `g` `G` | First / last task |
 | `Space` | Toggle done. The task stays visible until you move away, so you can undo. |
 | `Enter` | Edit title, due date, and notes. Links are shown read-only. |

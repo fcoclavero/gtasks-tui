@@ -43,8 +43,10 @@ pub struct Column {
     pub error: Option<String>,
     /// Screen rect from the last draw (empty when off-screen), for mouse hit-testing.
     pub area: Rect,
-    /// Rendered rows from the last draw as `(row index, top y, height)`.
-    pub visible_rows: Vec<(usize, u16, u16)>,
+    /// Rect inside the border where rows were last drawn (empty when there were none).
+    pub list_area: Rect,
+    /// Drawn height of every row from the last draw, for hit-testing and scrolling.
+    pub row_heights: Vec<u16>,
 }
 
 impl Column {
@@ -60,7 +62,8 @@ impl Column {
             loading: true,
             error: None,
             area: Rect::default(),
-            visible_rows: Vec::new(),
+            list_area: Rect::default(),
+            row_heights: Vec::new(),
         }
     }
 
@@ -125,11 +128,72 @@ impl Column {
         self.list_state.select(self.selected_index());
     }
 
+    /// End (exclusive) of the rows drawn when the list starts at `offset`. Like
+    /// ratatui's `List`, a row that does not fit entirely is not drawn.
+    fn visible_end(&self, offset: usize) -> usize {
+        let mut used = 0;
+        let mut end = offset;
+        for &height in self.row_heights.iter().skip(offset) {
+            used += usize::from(height);
+            if used > usize::from(self.list_area.height) {
+                break;
+            }
+            end += 1;
+        }
+        end
+    }
+
     fn row_at(&self, y: u16) -> Option<usize> {
-        self.visible_rows
-            .iter()
-            .find(|&&(_, top, height)| (top..top + height).contains(&y))
-            .map(|&(index, ..)| index)
+        let offset = self.list_state.offset();
+        let mut top = self.list_area.y;
+        for index in offset..self.visible_end(offset) {
+            let height = self.row_heights[index];
+            if (top..top + height).contains(&y) {
+                return Some(index);
+            }
+            top += height;
+        }
+        None
+    }
+
+    /// Scroll the list by `delta` rows, stopping once the last row is in view.
+    /// The selection stays put unless it would leave the screen, in which case
+    /// it moves to the nearest row still visible.
+    fn scroll_by(&mut self, delta: isize, show_completed: bool, sort_mode: SortMode) {
+        let viewport = usize::from(self.list_area.height);
+        // The smallest offset that shows the last row.
+        let mut max_offset = self.row_heights.len();
+        let mut used = 0;
+        while max_offset > 0 {
+            used += usize::from(self.row_heights[max_offset - 1]);
+            if used > viewport {
+                break;
+            }
+            max_offset -= 1;
+        }
+        let current = self.list_state.offset();
+        let offset = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            // Removed rows can leave the offset past `max_offset`; never scroll back up.
+            current
+                .saturating_add_signed(delta)
+                .min(max_offset)
+                .max(current)
+        };
+        if offset == current {
+            return;
+        }
+        *self.list_state.offset_mut() = offset;
+        let end = self.visible_end(offset);
+        if let Some(selected) = self.selected_index()
+            && end > offset
+        {
+            let target = selected.clamp(offset, end - 1);
+            if target != selected {
+                self.select_row(target, show_completed, sort_mode);
+            }
+        }
     }
 
     fn select_row(&mut self, index: usize, show_completed: bool, sort_mode: SortMode) {
@@ -630,10 +694,24 @@ impl App {
                     state.dragging = false;
                 }
             }
-            Mode::Normal if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                self.click_task(Position::new(mouse.column, mouse.row));
+            Mode::Normal => {
+                let position = Position::new(mouse.column, mouse.row);
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => self.click_task(position),
+                    MouseEventKind::ScrollDown => self.scroll_at(position, 1),
+                    MouseEventKind::ScrollUp => self.scroll_at(position, -1),
+                    _ => {}
+                }
             }
             _ => {}
+        }
+    }
+
+    /// Scroll the list under the pointer. Keyboard focus stays where it is.
+    fn scroll_at(&mut self, position: Position, delta: isize) {
+        let (show_completed, sort_mode) = (self.show_completed, self.sort_mode);
+        if let Some(column) = self.columns.iter_mut().find(|c| c.area.contains(position)) {
+            column.scroll_by(delta, show_completed, sort_mode);
         }
     }
 
@@ -1753,10 +1831,50 @@ mod tests {
     }
 
     fn draw(app: &mut App) -> ratatui::buffer::Buffer {
+        draw_in(app, 120, 30)
+    }
+
+    fn draw_in(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    const INBOX: &[&str] = &[
+        "Pay electricity bill",
+        "Call the dentist",
+        "Read the ratatui book",
+        "Reply to fixture thread",
+        "Think about the weekend",
+    ];
+    const WORK: &[&str] = &[
+        "Ship gtasks-tui",
+        "Implement the TUI",
+        "Write the README",
+        "Quarterly review prep",
+        "Collect metrics",
+    ];
+
+    /// Which of `titles` are listed in the column drawn `index`-th (40 cells wide at 120).
+    fn shown(
+        buffer: &ratatui::buffer::Buffer,
+        index: u16,
+        titles: &[&'static str],
+    ) -> Vec<&'static str> {
+        let mut text = String::new();
+        // Skip the title and footer borders and the status bar.
+        for y in 1..buffer.area.height - 2 {
+            for x in index * 40 + 1..index * 40 + 39 {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        titles
+            .iter()
+            .copied()
+            .filter(|title| text.contains(title))
+            .collect()
     }
 
     fn find(buffer: &ratatui::buffer::Buffer, text: &str) -> Position {
@@ -1770,13 +1888,17 @@ mod tests {
         panic!("{text:?} not on screen");
     }
 
-    fn left(kind: fn(MouseButton) -> MouseEventKind, at: Position) -> Msg {
+    fn mouse(kind: MouseEventKind, at: Position) -> Msg {
         Msg::Input(Event::Mouse(MouseEvent {
-            kind: kind(MouseButton::Left),
+            kind,
             column: at.x,
             row: at.y,
             modifiers: KeyModifiers::NONE,
         }))
+    }
+
+    fn left(kind: fn(MouseButton) -> MouseEventKind, at: Position) -> Msg {
+        mouse(kind(MouseButton::Left), at)
     }
 
     fn selected_title(app: &App) -> Option<String> {
@@ -1821,6 +1943,90 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         })));
         assert_eq!(app.focused, before);
+    }
+
+    #[tokio::test]
+    async fn scrolling_moves_the_list_under_the_pointer_and_keeps_the_selection_visible() {
+        let (mut app, _rx) = loaded_app(None).await;
+        let (inbox, work, someday) = (
+            Position::new(10, 2),
+            Position::new(50, 2),
+            Position::new(90, 2),
+        );
+        // Seven lines leave four per list: Inbox needs six (one task has a second line), Work five.
+        let mut buffer = draw_in(&mut app, 120, 7);
+        assert_eq!(shown(&buffer, 0, INBOX), &INBOX[..3]);
+        for (kind, visible, selected) in [
+            (MouseEventKind::ScrollDown, 1..4, "Call the dentist"),
+            (MouseEventKind::ScrollDown, 2..5, "Read the ratatui book"),
+            // The last task is in view, so the list stops.
+            (MouseEventKind::ScrollDown, 2..5, "Read the ratatui book"),
+            // Scrolling back leaves the selection alone while it stays on screen.
+            (MouseEventKind::ScrollUp, 1..4, "Read the ratatui book"),
+            (MouseEventKind::ScrollUp, 0..3, "Read the ratatui book"),
+            (MouseEventKind::ScrollUp, 0..3, "Read the ratatui book"),
+        ] {
+            app.handle(mouse(kind, inbox));
+            buffer = draw_in(&mut app, 120, 7);
+            assert_eq!(shown(&buffer, 0, INBOX), &INBOX[visible], "{kind:?}");
+            assert_eq!(selected_title(&app).as_deref(), Some(selected));
+        }
+
+        // Unfocused and empty lists scroll without taking keyboard focus.
+        assert_eq!(shown(&buffer, 1, WORK), &WORK[..4]);
+        for at in [work, work, someday] {
+            app.handle(mouse(MouseEventKind::ScrollDown, at));
+        }
+        buffer = draw_in(&mut app, 120, 7);
+        assert_eq!(app.focused, 0);
+        assert_eq!(shown(&buffer, 1, WORK), &WORK[1..]);
+        assert_eq!(
+            app.columns[1].selected_task().unwrap().title,
+            "Implement the TUI"
+        );
+        // Clicks land on the rows as scrolled.
+        app.handle(left(MouseEventKind::Down, Position::new(work.x, 2)));
+        assert_eq!(app.focused, 1);
+        assert_eq!(selected_title(&app).as_deref(), Some("Write the README"));
+    }
+
+    #[tokio::test]
+    async fn a_row_that_only_partly_fits_is_neither_drawn_nor_clickable() {
+        let (mut app, _rx) = loaded_app(None).await;
+        // Three lines fit the first two tasks but not the two-line third one.
+        let buffer = draw_in(&mut app, 120, 6);
+        assert_eq!(shown(&buffer, 0, INBOX), &INBOX[..2]);
+        let blank = Position::new(10, 3);
+        assert!((1..39).all(|x| buffer[(x, blank.y)].symbol() == " "));
+        app.handle(left(MouseEventKind::Down, blank));
+        assert_eq!(
+            selected_title(&app).as_deref(),
+            Some("Pay electricity bill")
+        );
+
+        app.handle(mouse(MouseEventKind::ScrollDown, blank));
+        let buffer = draw_in(&mut app, 120, 6);
+        assert_eq!(shown(&buffer, 0, INBOX), &INBOX[1..3]);
+        app.handle(left(MouseEventKind::Down, blank));
+        assert_eq!(
+            selected_title(&app).as_deref(),
+            Some("Read the ratatui book")
+        );
+    }
+
+    #[tokio::test]
+    async fn scrolling_the_selection_off_a_just_completed_task_hides_it() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char(' ')));
+        let buffer = draw_in(&mut app, 120, 7);
+        assert_eq!(shown(&buffer, 0, INBOX), &INBOX[..3]);
+        app.handle(mouse(MouseEventKind::ScrollDown, Position::new(10, 2)));
+        // The view moves by exactly one task even though the completed one left the list.
+        let buffer = draw_in(&mut app, 120, 7);
+        assert_eq!(shown(&buffer, 0, INBOX), &INBOX[1..4]);
+        assert_eq!(selected_title(&app).as_deref(), Some("Call the dentist"));
+        assert!(!row_ids(&app).contains(&"inbox-1".to_string()));
+        settle(&mut app, &mut rx).await;
     }
 
     #[tokio::test]
