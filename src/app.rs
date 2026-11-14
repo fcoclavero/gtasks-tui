@@ -1414,6 +1414,11 @@ mod tests {
         assert!(!is_temp_id(&selected));
         assert_eq!(column.task(&selected).unwrap().title, "New one");
         assert!(!column.tasks.iter().any(|t| t.is_temp()));
+        assert_eq!(
+            row_ids(&app)[0],
+            selected,
+            "new tasks stay on top once acknowledged"
+        );
     }
 
     #[tokio::test]

@@ -30,7 +30,8 @@ impl MockBackend {
     pub fn seeded(latency: Duration, fail_every: Option<u32>) -> Self {
         let today = dates::today();
         let due = |days: i64| Some(dates::to_api_due(today + ChronoDuration::days(days)));
-        let mut pos = 0u64;
+        // Seeded positions sit above `next_position`, so inserts land on top.
+        let mut pos = 1_000_000u64;
         let mut t = |id: &str, title: &str, parent: Option<&str>| {
             let mut task = Task::new_local(id.into(), title.into(), parent.map(String::from));
             task.position = format!("{pos:020}");
