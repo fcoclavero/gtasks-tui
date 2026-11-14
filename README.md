@@ -67,10 +67,19 @@ Press `s` to toggle all lists between Google's position order (the default) and 
 | `c` | Show / hide completed tasks |
 | `s` | Toggle position / due-date sorting |
 | `n` `N` | New task / new subtask under the selected task |
+| `m` | Move the selected task: to another list, under a top-level task, or out of its parent |
 | `d` `D` | Delete the selected task and its subtasks, after confirmation |
 | `r` | Refresh now |
 | `?` | Help |
 | `q` | Quit (waits up to 2 s for in-flight changes) |
+
+In the move menu (`m`), pick an action, then a target:
+
+- **Move to another list** lists the other task lists; the task goes to the top of the chosen one, taking its subtasks along.
+- **Change to subtask** (top-level tasks only) lists the top-level tasks shown in the current list; the task is nested under the chosen one. Unavailable when the task has subtasks of its own, since Google Tasks only allows one level of nesting.
+- **Move out of _parent_** (subtasks only) makes the task top-level again, placed right after its former parent.
+
+`↑` `↓` choose, `Enter` selects, `Esc` goes back a step (or closes the menu).
 
 In the new-task prompt: `Tab` switches to creating a subtask under the selected task, keeping the title you have typed. The prompt names the parent; `Enter` creates the task and `Esc` cancels. If a subtask is selected, the new subtask goes under the same parent (Google Tasks supports one nesting level).
 

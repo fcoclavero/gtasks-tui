@@ -101,6 +101,26 @@ pub struct TaskList {
     pub title: String,
 }
 
+/// Where `tasks.move` puts a task. Every field is optional on the API: no
+/// `destination_tasklist` keeps the current list, no `parent` means top level,
+/// and no `previous` means first among its new siblings.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MoveTarget {
+    pub destination_tasklist: Option<String>,
+    pub parent: Option<String>,
+    pub previous: Option<String>,
+}
+
+/// A local stand-in position that sorts right after `previous` and before the
+/// next sibling. Positions are fixed-width digit strings compared as text, so
+/// any suffix works; the server's real position replaces it once the move lands.
+pub fn position_after(previous: &str) -> String {
+    format!("{previous}0")
+}
+
+/// A local stand-in position that sorts before every server-assigned one.
+pub const FIRST_POSITION: &str = "";
+
 /// A partial update. `None` means "leave untouched"; for `due`, `Some(None)` clears it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TaskPatch {
@@ -196,6 +216,14 @@ mod tests {
         assert_eq!(task.parent.as_deref(), Some("p"));
         assert_eq!(task.links[0].kind, "email");
         assert!(task.web_view_link.is_some());
+    }
+
+    #[test]
+    fn stand_in_positions_sort_between_neighbours() {
+        let (prev, next) = ("00000000000000000005", "00000000000000000006");
+        let after = position_after(prev);
+        assert!(prev < after.as_str() && after.as_str() < next);
+        assert!(FIRST_POSITION < "00000000000000000000");
     }
 
     #[test]

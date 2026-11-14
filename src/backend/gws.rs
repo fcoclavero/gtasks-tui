@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
 use super::{BackendError, BackendResult, TasksBackend};
-use crate::model::{Task, TaskList, TaskPatch, TaskStatus};
+use crate::model::{MoveTarget, Task, TaskList, TaskPatch, TaskStatus};
 
 pub struct GwsBackend {
     bin: PathBuf,
@@ -72,6 +72,21 @@ fn update_body(mut task: Map<String, Value>, patch: &TaskPatch) -> Value {
         task.extend(fields);
     }
     Value::Object(task)
+}
+
+/// `tasks.move` query parameters; absent options are omitted, not sent as `null`.
+fn move_params(tasklist: &str, task: &str, target: &MoveTarget) -> Value {
+    let mut params = json!({ "tasklist": tasklist, "task": task });
+    for (key, value) in [
+        ("destinationTasklist", &target.destination_tasklist),
+        ("parent", &target.parent),
+        ("previous", &target.previous),
+    ] {
+        if let Some(value) = value {
+            params[key] = json!(value);
+        }
+    }
+    params
 }
 
 #[derive(Deserialize)]
@@ -258,6 +273,19 @@ impl TasksBackend for GwsBackend {
             .await?;
         Ok(())
     }
+
+    async fn move_task(
+        &self,
+        tasklist: &str,
+        task: &str,
+        target: &MoveTarget,
+    ) -> BackendResult<Task> {
+        let params = move_params(tasklist, task, target).to_string();
+        let out = self
+            .exec(args(&["tasks", "tasks", "move", "--params", &params]))
+            .await?;
+        parse_single(&out)
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +315,24 @@ mod tests {
         assert_eq!(
             update_body(current, &patch),
             json!({"id": "a", "title": "new", "notes": "n", "status": "needsAction"})
+        );
+    }
+
+    #[test]
+    fn move_params_omit_unset_fields() {
+        assert_eq!(
+            move_params("l", "t", &MoveTarget::default()),
+            json!({"tasklist": "l", "task": "t"})
+        );
+        let target = MoveTarget {
+            destination_tasklist: Some("dest".into()),
+            parent: Some("p".into()),
+            previous: Some("prev".into()),
+        };
+        assert_eq!(
+            move_params("l", "t", &target),
+            json!({"tasklist": "l", "task": "t", "destinationTasklist": "dest",
+                   "parent": "p", "previous": "prev"})
         );
     }
 

@@ -10,7 +10,7 @@ use chrono::Duration as ChronoDuration;
 
 use super::{BackendError, BackendResult, TasksBackend};
 use crate::dates;
-use crate::model::{Link, Task, TaskList, TaskPatch, TaskStatus};
+use crate::model::{Link, MoveTarget, Task, TaskList, TaskPatch, TaskStatus, position_after};
 
 pub struct MockBackend {
     state: Mutex<State>,
@@ -30,7 +30,7 @@ impl MockBackend {
     pub fn seeded(latency: Duration, fail_every: Option<u32>) -> Self {
         let today = dates::today();
         let due = |days: i64| Some(dates::to_api_due(today + ChronoDuration::days(days)));
-        // Seeded positions sit above `next_position`, so inserts land on top.
+        // Seeded positions sit above `next_position`, so inserts and moves land on top.
         let mut pos = 1_000_000u64;
         let mut t = |id: &str, title: &str, parent: Option<&str>| {
             let mut task = Task::new_local(id.into(), title.into(), parent.map(String::from));
@@ -225,5 +225,77 @@ impl TasksBackend for MockBackend {
         }
         tasks.retain(|t| t.id != task && t.parent.as_deref() != Some(task));
         Ok(())
+    }
+
+    /// Mirrors `tasks.move`, assuming subtasks travel with their parent when it
+    /// changes lists. Rejects nesting deeper than one level, like Google does.
+    async fn move_task(
+        &self,
+        tasklist: &str,
+        task: &str,
+        target: &MoveTarget,
+    ) -> BackendResult<Task> {
+        self.delay().await;
+        self.maybe_fail()?;
+        let mut state = self.lock();
+        let destination = target.destination_tasklist.as_deref().unwrap_or(tasklist);
+        if !state.tasks.contains_key(destination) {
+            return Err(not_found("task list"));
+        }
+        let source = state
+            .tasks
+            .get_mut(tasklist)
+            .ok_or_else(|| not_found("task list"))?;
+        let index = source
+            .iter()
+            .position(|t| t.id == task)
+            .ok_or_else(|| not_found("task"))?;
+        let has_children = source.iter().any(|t| t.parent.as_deref() == Some(task));
+        let mut moved = vec![source.remove(index)];
+        if destination != tasklist {
+            let (children, kept) = std::mem::take(source)
+                .into_iter()
+                .partition(|t| t.parent.as_deref() == Some(task));
+            *source = kept;
+            moved.extend::<Vec<Task>>(children);
+        }
+
+        let siblings = &state.tasks[destination];
+        let invalid = match target.parent.as_deref() {
+            Some(parent) if has_children || parent == task => true,
+            Some(parent) => !siblings
+                .iter()
+                .any(|t| t.id == parent && t.parent.is_none()),
+            None => false,
+        };
+        let previous = match target.previous.as_deref() {
+            Some(previous) => match siblings.iter().find(|t| t.id == previous) {
+                Some(found) => Some(found.position.clone()),
+                None => return Err(not_found("previous task")),
+            },
+            None => None,
+        };
+        if invalid {
+            state.tasks.get_mut(tasklist).unwrap().extend(moved);
+            return Err(BackendError::Api {
+                code: 400,
+                reason: "invalid".into(),
+                message: "invalid parent".into(),
+            });
+        }
+        let position = match previous {
+            Some(previous) => position_after(&previous),
+            None => {
+                state.next_position -= 1;
+                format!("{:020}", state.next_position)
+            }
+        };
+        let main = &mut moved[0];
+        main.parent = target.parent.clone();
+        main.position = position;
+        main.updated = Some(dates::now_rfc3339());
+        let result = main.clone();
+        state.tasks.get_mut(destination).unwrap().extend(moved);
+        Ok(result)
     }
 }

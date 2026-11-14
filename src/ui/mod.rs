@@ -30,6 +30,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             subtask_count,
             ..
         } => prompt::draw_confirm_delete(frame, main, title, *subtask_count),
+        Mode::Move(state) => prompt::draw_move_menu(frame, main, state),
         Mode::Help => help::draw(frame, main),
     }
     status::draw(frame, status_area, app);

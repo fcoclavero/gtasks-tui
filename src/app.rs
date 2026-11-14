@@ -16,7 +16,9 @@ use crate::backend::BackendError;
 use crate::browser;
 use crate::clipboard;
 use crate::details::{DetailsAction, DetailsState, Field};
-use crate::model::{Task, TaskList, TaskPatch, TaskStatus};
+use crate::model::{
+    FIRST_POSITION, MoveTarget, Task, TaskList, TaskPatch, TaskStatus, position_after,
+};
 use crate::text_input;
 use crate::tree::{self, Row, SortMode};
 use crate::worker::{Cmd, Dispatcher, Msg, OpOutcome};
@@ -218,6 +220,41 @@ impl Column {
         self.select_row(target, show_completed, sort_mode);
     }
 
+    /// Before `prev` and its children leave this column: select the next
+    /// surviving row below, else the nearest above.
+    fn select_survivor(&mut self, prev: &Task, prev_children: &[Task]) {
+        let removed: HashSet<&str> = std::iter::once(prev.id.as_str())
+            .chain(prev_children.iter().map(|t| t.id.as_str()))
+            .collect();
+        let current = self.selected_index().unwrap_or(0);
+        let survivor = |r: &Row| !removed.contains(r.task_id.as_str());
+        let next = self
+            .rows
+            .iter()
+            .skip(current + 1)
+            .find(|r| survivor(r))
+            .or_else(|| {
+                self.rows[..current.min(self.rows.len())]
+                    .iter()
+                    .rev()
+                    .find(|r| survivor(r))
+            })
+            .map(|r| r.task_id.clone());
+        self.selected = next;
+        self.pinned = None;
+    }
+
+    /// Remove `task_id` and its direct children, returning them.
+    fn take_with_children(&mut self, task_id: &str) -> Option<(Task, Vec<Task>)> {
+        let index = self.tasks.iter().position(|t| t.id == task_id)?;
+        let task = self.tasks.remove(index);
+        let (children, kept): (Vec<Task>, Vec<Task>) = std::mem::take(&mut self.tasks)
+            .into_iter()
+            .partition(|t| t.parent.as_deref() == Some(task_id));
+        self.tasks = kept;
+        Some((task, children))
+    }
+
     fn leave(&mut self, show_completed: bool, sort_mode: SortMode) {
         if self.pinned.take().is_some() {
             self.rebuild_rows(show_completed, sort_mode);
@@ -235,6 +272,74 @@ pub struct NewTaskState {
     dragging: bool,
 }
 
+/// What a move-menu entry does when chosen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MoveChoice {
+    /// Step 1: pick a destination list next.
+    ToList,
+    /// Step 1: pick a new parent next.
+    ToSubtask,
+    /// Step 1: make the subtask a top-level task right after its parent.
+    OutOfParent,
+    /// Step 2: move to this task list.
+    List(String),
+    /// Step 2: nest under this top-level task.
+    Parent(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveStep {
+    Action,
+    List,
+    Parent,
+}
+
+pub struct MoveItem {
+    pub label: String,
+    pub choice: MoveChoice,
+    /// Why the entry can't be chosen; shown next to it, dimmed.
+    pub disabled: Option<&'static str>,
+}
+
+pub struct MoveMenuState {
+    pub tasklist_id: String,
+    pub task_id: String,
+    pub title: String,
+    pub step: MoveStep,
+    pub items: Vec<MoveItem>,
+    pub list_state: ListState,
+}
+
+impl MoveMenuState {
+    fn set_items(&mut self, step: MoveStep, items: Vec<MoveItem>, prefer: Option<&MoveChoice>) {
+        let index = prefer
+            .and_then(|c| items.iter().position(|i| &i.choice == c))
+            .or_else(|| items.iter().position(|i| i.disabled.is_none()))
+            .unwrap_or(0);
+        self.step = step;
+        self.items = items;
+        self.list_state = ListState::default();
+        self.list_state
+            .select((!self.items.is_empty()).then_some(index));
+    }
+
+    fn move_by(&mut self, delta: isize) {
+        if self.items.is_empty() {
+            return;
+        }
+        let max = self.items.len() as isize - 1;
+        let current = self.list_state.selected().unwrap_or(0) as isize;
+        self.list_state
+            .select(Some((current + delta).clamp(0, max) as usize));
+    }
+
+    fn chosen(&self) -> Option<&MoveItem> {
+        self.items
+            .get(self.list_state.selected()?)
+            .filter(|i| i.disabled.is_none())
+    }
+}
+
 pub enum Mode {
     Normal,
     Details(Box<DetailsState>),
@@ -245,6 +350,7 @@ pub enum Mode {
         title: String,
         subtask_count: usize,
     },
+    Move(Box<MoveMenuState>),
     Help,
 }
 
@@ -275,13 +381,31 @@ enum Op {
         prev: Task,
         prev_children: Vec<Task>,
     },
+    /// `prev_children` is only filled for cross-list moves, where the
+    /// subtasks travel with their parent.
+    Move {
+        prev: Task,
+        prev_children: Vec<Task>,
+        destination: Option<String>,
+    },
 }
 
 impl Op {
     fn task_id(&self) -> &str {
         match self {
-            Op::Toggle { prev } | Op::Edit { prev } | Op::Delete { prev, .. } => &prev.id,
+            Op::Toggle { prev }
+            | Op::Edit { prev }
+            | Op::Delete { prev, .. }
+            | Op::Move { prev, .. } => &prev.id,
             Op::Create { temp_id } => temp_id,
+        }
+    }
+
+    /// The other list a cross-list move touches.
+    fn destination(&self) -> Option<&str> {
+        match self {
+            Op::Move { destination, .. } => destination.as_deref(),
+            _ => None,
         }
     }
 }
@@ -568,7 +692,17 @@ impl App {
     }
 
     fn has_pending_for_list(&self, tasklist_id: &str) -> bool {
-        self.pending.values().any(|p| p.tasklist_id == tasklist_id)
+        self.pending
+            .values()
+            .any(|p| p.tasklist_id == tasklist_id || p.op.destination() == Some(tasklist_id))
+    }
+
+    /// A cross-list move is queued on the source list, so anything sent to the
+    /// destination list about this task could reach Google before the move does.
+    fn is_moving_between_lists(&self, task_id: &str) -> bool {
+        self.pending
+            .values()
+            .any(|p| p.op.destination().is_some() && p.op.task_id() == task_id)
     }
 
     fn has_pending_for_task(&self, tasklist_id: &str, task_id: &str) -> bool {
@@ -605,6 +739,7 @@ impl App {
             Mode::Details(_) => self.on_key_details(key),
             Mode::NewTask(_) => self.on_key_new_task(key),
             Mode::ConfirmDelete { .. } => self.on_key_confirm_delete(key),
+            Mode::Move(_) => self.on_key_move(key),
         }
     }
 
@@ -644,6 +779,7 @@ impl App {
             KeyCode::Char('n') => self.open_new_task(false),
             KeyCode::Char('N') => self.open_new_task(true),
             KeyCode::Char('d' | 'D') => self.open_confirm_delete(),
+            KeyCode::Char('m') => self.open_move_menu(),
             KeyCode::Char('r') => self.start_refresh(),
             _ => {}
         }
@@ -849,6 +985,10 @@ impl App {
             self.info("task is still being created, try again in a moment");
             return None;
         }
+        if self.is_moving_between_lists(&task.id) {
+            self.info("task is still being moved, try again in a moment");
+            return None;
+        }
         Some((tasklist_id, task))
     }
 
@@ -934,6 +1074,14 @@ impl App {
             self.info("parent is still being created, try again in a moment");
             return;
         }
+        if as_subtask
+            && column
+                .selected_task()
+                .is_some_and(|t| self.is_moving_between_lists(subtask_parent_id(t)))
+        {
+            self.info("parent is still being moved, try again in a moment");
+            return;
+        }
         let mut input = TextArea::default();
         input.set_cursor_line_style(ratatui::style::Style::default());
         input.set_placeholder_text("Task title");
@@ -951,7 +1099,7 @@ impl App {
     }
 
     fn new_task_as_subtask(&mut self) {
-        let Mode::NewTask(state) = &mut self.mode else {
+        let Mode::NewTask(state) = &self.mode else {
             return;
         };
         if state.parent.is_some() {
@@ -967,13 +1115,16 @@ impl App {
             self.info("parent is still being created, try again in a moment");
             return;
         }
-        // Only one nesting level exists: a subtask's sibling goes under its parent.
-        let parent_id = selected
-            .parent
-            .clone()
-            .unwrap_or_else(|| selected.id.clone());
-        state.parent_title = column.task(&parent_id).map(|t| t.title.clone());
-        state.parent = Some(parent_id);
+        let parent_id = subtask_parent_id(selected).to_string();
+        if self.is_moving_between_lists(&parent_id) {
+            self.info("parent is still being moved, try again in a moment");
+            return;
+        }
+        let parent_title = column.task(&parent_id).map(|t| t.title.clone());
+        if let Mode::NewTask(state) = &mut self.mode {
+            state.parent_title = parent_title;
+            state.parent = Some(parent_id);
+        }
     }
 
     fn create_task(&mut self, tasklist_id: String, parent: Option<String>, title: String) {
@@ -1028,37 +1179,11 @@ impl App {
         let Some(column) = self.columns.iter_mut().find(|c| c.list.id == tasklist_id) else {
             return;
         };
-        let Some(index) = column.tasks.iter().position(|t| t.id == task_id) else {
+        let Some((prev, prev_children)) = column.take_with_children(&task_id) else {
             self.info("task no longer exists");
             return;
         };
-        let prev = column.tasks.remove(index);
-        let (prev_children, kept): (Vec<Task>, Vec<Task>) = column
-            .tasks
-            .drain(..)
-            .partition(|t| t.parent.as_deref() == Some(task_id.as_str()));
-        column.tasks = kept;
-
-        // Select the next surviving row below, else the nearest above.
-        let removed: HashSet<&str> = std::iter::once(prev.id.as_str())
-            .chain(prev_children.iter().map(|t| t.id.as_str()))
-            .collect();
-        let current = column.selected_index().unwrap_or(0);
-        let survivor = |r: &Row| !removed.contains(r.task_id.as_str());
-        let next = column
-            .rows
-            .iter()
-            .skip(current + 1)
-            .find(|r| survivor(r))
-            .or_else(|| {
-                column.rows[..current.min(column.rows.len())]
-                    .iter()
-                    .rev()
-                    .find(|r| survivor(r))
-            })
-            .map(|r| r.task_id.clone());
-        column.selected = next;
-        column.pinned = None;
+        column.select_survivor(&prev, &prev_children);
         column.rebuild_rows(show_completed, self.sort_mode);
 
         let list_for_cmd = tasklist_id.clone();
@@ -1076,9 +1201,327 @@ impl App {
         );
     }
 
+    // ----- move -------------------------------------------------------------
+
+    fn open_move_menu(&mut self) {
+        let Some((tasklist_id, task)) = self.actionable_selection() else {
+            return;
+        };
+        let mut state = MoveMenuState {
+            tasklist_id,
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            step: MoveStep::Action,
+            items: Vec::new(),
+            list_state: ListState::default(),
+        };
+        let items = self.move_action_items(&state);
+        state.set_items(MoveStep::Action, items, None);
+        self.mode = Mode::Move(Box::new(state));
+    }
+
+    /// The task's parent, when it is shown nested under it (orphans are top level).
+    fn shown_parent<'a>(column: &'a Column, task: &Task) -> Option<&'a Task> {
+        column
+            .task(task.parent.as_deref()?)
+            .filter(|parent| !parent.deleted)
+    }
+
+    fn move_action_items(&self, state: &MoveMenuState) -> Vec<MoveItem> {
+        let Some(column) = self.columns.iter().find(|c| c.list.id == state.tasklist_id) else {
+            return Vec::new();
+        };
+        let Some(task) = column.task(&state.task_id) else {
+            return Vec::new();
+        };
+        let mut items = vec![MoveItem {
+            label: "Move to another list".into(),
+            choice: MoveChoice::ToList,
+            disabled: (self.columns.len() < 2).then_some("no other lists"),
+        }];
+        if let Some(parent) = Self::shown_parent(column, task) {
+            items.push(MoveItem {
+                label: format!("Move out of {}", parent.title),
+                choice: MoveChoice::OutOfParent,
+                disabled: None,
+            });
+        } else {
+            let has_children = column
+                .tasks
+                .iter()
+                .any(|t| t.parent.as_deref() == Some(task.id.as_str()) && !t.deleted);
+            let disabled = if has_children {
+                Some("it has subtasks")
+            } else if task.hidden {
+                Some("cleared tasks can't be nested")
+            } else if self.parent_items(state).is_empty() {
+                Some("no other top-level tasks")
+            } else {
+                None
+            };
+            items.push(MoveItem {
+                label: "Change to subtask".into(),
+                choice: MoveChoice::ToSubtask,
+                disabled,
+            });
+        }
+        items
+    }
+
+    fn list_items(&self, state: &MoveMenuState) -> Vec<MoveItem> {
+        self.columns
+            .iter()
+            .filter(|c| c.list.id != state.tasklist_id)
+            .map(|c| MoveItem {
+                label: c.list.title.clone(),
+                choice: MoveChoice::List(c.list.id.clone()),
+                disabled: None,
+            })
+            .collect()
+    }
+
+    /// Top-level tasks shown in the list, in display order, that Google accepts
+    /// as a parent right now.
+    fn parent_items(&self, state: &MoveMenuState) -> Vec<MoveItem> {
+        let Some(column) = self.columns.iter().find(|c| c.list.id == state.tasklist_id) else {
+            return Vec::new();
+        };
+        column
+            .rows
+            .iter()
+            .filter(|r| r.depth == 0 && r.task_id != state.task_id)
+            .filter_map(|r| column.task(&r.task_id))
+            .filter(|t| !t.is_temp() && !t.hidden && !self.is_moving_between_lists(&t.id))
+            .map(|t| MoveItem {
+                label: t.title.clone(),
+                choice: MoveChoice::Parent(t.id.clone()),
+                disabled: None,
+            })
+            .collect()
+    }
+
+    fn on_key_move(&mut self, key: KeyEvent) {
+        let Mode::Move(state) = &mut self.mode else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => state.move_by(-1),
+            KeyCode::Down | KeyCode::Char('j') => state.move_by(1),
+            KeyCode::PageUp => state.move_by(-10),
+            KeyCode::PageDown => state.move_by(10),
+            KeyCode::Home | KeyCode::Char('g') => state.move_by(isize::MIN / 2),
+            KeyCode::End | KeyCode::Char('G') => state.move_by(isize::MAX / 2),
+            KeyCode::Esc if state.step == MoveStep::Action => self.mode = Mode::Normal,
+            KeyCode::Esc => self.move_menu_back(),
+            KeyCode::Enter => {
+                if let Some(choice) = state.chosen().map(|i| i.choice.clone()) {
+                    self.on_move_choice(choice);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// From a step-2 picker back to the first menu, on the entry that led there.
+    fn move_menu_back(&mut self) {
+        let Mode::Move(state) = &self.mode else {
+            return;
+        };
+        let back_to = match state.step {
+            MoveStep::Parent => MoveChoice::ToSubtask,
+            _ => MoveChoice::ToList,
+        };
+        let items = self.move_action_items(state);
+        if let Mode::Move(state) = &mut self.mode {
+            state.set_items(MoveStep::Action, items, Some(&back_to));
+        }
+    }
+
+    fn on_move_choice(&mut self, choice: MoveChoice) {
+        let Mode::Move(state) = &self.mode else {
+            return;
+        };
+        let (tasklist_id, task_id) = (state.tasklist_id.clone(), state.task_id.clone());
+        let next = match &choice {
+            MoveChoice::ToList => Some((MoveStep::List, self.list_items(state))),
+            MoveChoice::ToSubtask => Some((MoveStep::Parent, self.parent_items(state))),
+            _ => None,
+        };
+        if let Some((step, items)) = next {
+            if let Mode::Move(state) = &mut self.mode {
+                state.set_items(step, items, None);
+            }
+            return;
+        }
+        self.mode = Mode::Normal;
+        let target = match choice {
+            MoveChoice::List(destination) => MoveTarget {
+                destination_tasklist: Some(destination),
+                ..MoveTarget::default()
+            },
+            MoveChoice::Parent(parent) => MoveTarget {
+                parent: Some(parent),
+                ..MoveTarget::default()
+            },
+            MoveChoice::OutOfParent => {
+                let column = self.columns.iter().find(|c| c.list.id == tasklist_id);
+                let task = column.and_then(|c| c.task(&task_id));
+                let parent = column.zip(task).and_then(|(c, t)| Self::shown_parent(c, t));
+                // Right after the old parent, unless Google won't accept it as `previous`.
+                let previous = parent
+                    .filter(|p| !p.hidden && !task.is_some_and(|t| t.hidden))
+                    .map(|p| p.id.clone());
+                MoveTarget {
+                    previous,
+                    ..MoveTarget::default()
+                }
+            }
+            MoveChoice::ToList | MoveChoice::ToSubtask => unreachable!("handled above"),
+        };
+        self.move_task(tasklist_id, task_id, target);
+    }
+
+    fn move_task(&mut self, tasklist_id: String, task_id: String, target: MoveTarget) {
+        let show_completed = self.show_completed;
+        let sort_mode = self.sort_mode;
+        let destination = target
+            .destination_tasklist
+            .clone()
+            .filter(|d| *d != tasklist_id);
+        let dest_title = destination.as_ref().and_then(|d| {
+            self.columns
+                .iter()
+                .find(|c| &c.list.id == d)
+                .map(|c| c.list.title.clone())
+        });
+        let Some(column) = self.columns.iter_mut().find(|c| c.list.id == tasklist_id) else {
+            return;
+        };
+        if column.task(&task_id).is_none() {
+            self.info("task no longer exists");
+            return;
+        }
+
+        let op = match (&destination, dest_title) {
+            (Some(destination), Some(dest_title)) => {
+                let (prev, prev_children) = column.take_with_children(&task_id).unwrap();
+                column.select_survivor(&prev, &prev_children);
+                column.rebuild_rows(show_completed, sort_mode);
+                let mut moved = prev.clone();
+                moved.parent = None;
+                moved.position = FIRST_POSITION.to_string();
+                let dest = self
+                    .columns
+                    .iter_mut()
+                    .find(|c| &c.list.id == destination)
+                    .unwrap();
+                dest.tasks.push(moved);
+                dest.tasks.extend(prev_children.iter().cloned());
+                dest.selected = Some(task_id.clone());
+                dest.rebuild_rows(show_completed, sort_mode);
+                self.info(format!("moved '{}' to {dest_title}", prev.title));
+                Op::Move {
+                    prev,
+                    prev_children,
+                    destination: Some(destination.clone()),
+                }
+            }
+            (Some(_), None) => {
+                self.info("task list no longer exists");
+                return;
+            }
+            (None, _) => {
+                let previous_position = target
+                    .previous
+                    .as_deref()
+                    .and_then(|p| column.task(p))
+                    .map(|p| position_after(&p.position));
+                let task = column.task_mut(&task_id).unwrap();
+                let prev = task.clone();
+                task.parent = target.parent.clone();
+                task.position = previous_position.unwrap_or_else(|| FIRST_POSITION.to_string());
+                column.rebuild_rows(show_completed, sort_mode);
+                Op::Move {
+                    prev,
+                    prev_children: Vec::new(),
+                    destination: None,
+                }
+            }
+        };
+        let list_for_cmd = tasklist_id.clone();
+        self.submit(tasklist_id, op, move |op_id| Cmd::Move {
+            op_id,
+            tasklist: list_for_cmd,
+            task: task_id,
+            target,
+        });
+    }
+
+    fn on_move_done(
+        &mut self,
+        tasklist_id: String,
+        result: Result<OpOutcome, BackendError>,
+        prev: Task,
+        prev_children: Vec<Task>,
+        destination: Option<String>,
+    ) {
+        let show_completed = self.show_completed;
+        let sort_mode = self.sort_mode;
+        let home = destination.clone().unwrap_or_else(|| tasklist_id.clone());
+        let busy = self.has_pending_for_task(&home, &prev.id);
+        match result {
+            Ok(outcome) => {
+                if let (OpOutcome::Task(server), false) = (outcome, busy)
+                    && let Some(column) = self.columns.iter_mut().find(|c| c.list.id == home)
+                {
+                    if column.selected.as_deref() == Some(prev.id.as_str()) {
+                        column.selected = Some(server.id.clone());
+                    }
+                    if let Some(task) = column.task_mut(&prev.id) {
+                        *task = *server;
+                    }
+                    column.rebuild_rows(show_completed, sort_mode);
+                }
+            }
+            Err(err) => {
+                if let Some(dest) = &destination
+                    && let Some(column) = self.columns.iter_mut().find(|c| &c.list.id == dest)
+                {
+                    column.take_with_children(&prev.id);
+                    column.rebuild_rows(show_completed, sort_mode);
+                }
+                if let Some(column) = self.columns.iter_mut().find(|c| c.list.id == tasklist_id) {
+                    match column.task_mut(&prev.id) {
+                        Some(task) => *task = prev,
+                        None => {
+                            column.tasks.push(prev);
+                            column.tasks.extend(prev_children);
+                        }
+                    }
+                    column.rebuild_rows(show_completed, sort_mode);
+                }
+                self.error(&err);
+            }
+        }
+        if let Some(dest) = destination {
+            self.dirty_lists.insert(dest);
+        }
+        self.dirty_lists.insert(tasklist_id);
+        self.flush_dirty();
+        self.tick_quit();
+    }
+
     fn on_op_done(&mut self, op_id: u64, result: Result<OpOutcome, BackendError>) {
         let Some(PendingOp { tasklist_id, op }) = self.pending.remove(&op_id) else {
             return;
+        };
+        let op = match op {
+            Op::Move {
+                prev,
+                prev_children,
+                destination,
+            } => return self.on_move_done(tasklist_id, result, prev, prev_children, destination),
+            op => op,
         };
         let show_completed = self.show_completed;
         let busy = self.has_pending_for_task(&tasklist_id, op.task_id());
@@ -1130,6 +1573,7 @@ impl App {
                     Ok(OpOutcome::Deleted),
                     Op::Toggle { .. } | Op::Edit { .. } | Op::Create { .. },
                 ) => {}
+                (_, Op::Move { .. }) => unreachable!("moves settle in on_move_done"),
             }
             column.rebuild_rows(show_completed, self.sort_mode);
         }
@@ -1140,6 +1584,12 @@ impl App {
         self.flush_dirty();
         self.tick_quit();
     }
+}
+
+/// Where a new subtask of `selected` goes. Only one nesting level exists, so a
+/// subtask's sibling goes under the same parent.
+fn subtask_parent_id(selected: &Task) -> &str {
+    selected.parent.as_deref().unwrap_or(&selected.id)
 }
 
 fn account_hint() -> String {
@@ -1821,6 +2271,255 @@ mod tests {
             app.focused_column().unwrap().task("inbox-1").unwrap().title,
             "Pay electricity bill!"
         );
+    }
+
+    fn move_menu(app: &App) -> &MoveMenuState {
+        match &app.mode {
+            Mode::Move(state) => state,
+            _ => panic!("expected move menu"),
+        }
+    }
+
+    fn menu_labels(app: &App) -> Vec<String> {
+        move_menu(app)
+            .items
+            .iter()
+            .map(|i| i.label.clone())
+            .collect()
+    }
+
+    fn rows_with_depth(column: &Column) -> Vec<(&str, u8)> {
+        column
+            .rows
+            .iter()
+            .map(|r| (r.task_id.as_str(), r.depth))
+            .collect()
+    }
+
+    fn render(app: &mut App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn move_to_another_list_moves_task_and_keeps_it_there_after_refresh() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('m')));
+        assert_eq!(
+            menu_labels(&app),
+            vec!["Move to another list", "Change to subtask"]
+        );
+        app.handle(key(KeyCode::Enter));
+        assert_eq!(move_menu(&app).step, MoveStep::List);
+        assert_eq!(menu_labels(&app), vec!["Work", "Someday"]);
+        app.handle(key(KeyCode::Down));
+        app.handle(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        let check = |app: &App| {
+            assert!(!app.columns[0].tasks.iter().any(|t| t.id == "inbox-1"));
+            assert_eq!(app.columns[0].selected.as_deref(), Some("inbox-2"));
+            assert_eq!(rows_with_depth(&app.columns[2]), vec![("inbox-1", 0)]);
+            assert_eq!(app.columns[2].selected.as_deref(), Some("inbox-1"));
+        };
+        check(&app);
+        assert_eq!(
+            app.status.as_ref().unwrap().text,
+            "moved 'Pay electricity bill' to Someday"
+        );
+        settle(&mut app, &mut rx).await;
+        app.start_refresh();
+        settle(&mut app, &mut rx).await;
+        check(&app);
+    }
+
+    #[tokio::test]
+    async fn move_to_another_list_takes_subtasks_along() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('2')));
+        assert_eq!(
+            app.focused_column().unwrap().selected.as_deref(),
+            Some("work-1")
+        );
+        for code in [KeyCode::Char('m'), KeyCode::Enter, KeyCode::Enter] {
+            app.handle(key(code));
+        }
+        let check = |app: &App| {
+            assert_eq!(
+                rows_with_depth(&app.columns[0])[..3],
+                [("work-1", 0), ("work-1b", 1), ("work-1c", 1)]
+            );
+            assert!(app.columns[0].task("work-1a").is_some());
+            assert!(
+                !app.columns[1]
+                    .tasks
+                    .iter()
+                    .any(|t| t.id.starts_with("work-1"))
+            );
+            assert_eq!(app.columns[1].selected.as_deref(), Some("work-2"));
+        };
+        check(&app);
+        settle(&mut app, &mut rx).await;
+        app.start_refresh();
+        settle(&mut app, &mut rx).await;
+        check(&app);
+    }
+
+    #[tokio::test]
+    async fn change_to_subtask_nests_under_chosen_top_level_task() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Down)); // inbox-2
+        app.handle(key(KeyCode::Char('m')));
+        app.handle(key(KeyCode::Down));
+        app.handle(key(KeyCode::Enter));
+        assert_eq!(move_menu(&app).step, MoveStep::Parent);
+        assert_eq!(
+            menu_labels(&app),
+            vec![
+                "Pay electricity bill",
+                "Read the ratatui book",
+                "Reply to fixture thread",
+                "Think about the weekend",
+            ]
+        );
+        app.handle(key(KeyCode::Down));
+        app.handle(key(KeyCode::Enter));
+        let expected = vec![
+            ("inbox-1", 0),
+            ("inbox-3", 0),
+            ("inbox-2", 1),
+            ("inbox-4", 0),
+            ("inbox-7", 0),
+        ];
+        assert_eq!(rows_with_depth(&app.columns[0]), expected);
+        assert_eq!(app.columns[0].selected.as_deref(), Some("inbox-2"));
+        settle(&mut app, &mut rx).await;
+        app.start_refresh();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(rows_with_depth(&app.columns[0]), expected);
+        assert_eq!(
+            app.columns[0].task("inbox-2").unwrap().parent.as_deref(),
+            Some("inbox-3")
+        );
+    }
+
+    #[tokio::test]
+    async fn move_out_of_parent_places_task_right_after_it() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('2')));
+        app.handle(key(KeyCode::Down)); // work-1b
+        app.handle(key(KeyCode::Char('m')));
+        assert_eq!(
+            menu_labels(&app),
+            vec!["Move to another list", "Move out of Ship gtasks-tui"]
+        );
+        app.handle(key(KeyCode::Down));
+        app.handle(key(KeyCode::Enter));
+        let expected = vec![
+            ("work-1", 0),
+            ("work-1c", 1),
+            ("work-1b", 0),
+            ("work-2", 0),
+            ("work-2a", 1),
+        ];
+        assert_eq!(rows_with_depth(&app.columns[1]), expected);
+        assert_eq!(app.columns[1].selected.as_deref(), Some("work-1b"));
+        settle(&mut app, &mut rx).await;
+        app.start_refresh();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(rows_with_depth(&app.columns[1]), expected);
+    }
+
+    #[tokio::test]
+    async fn subtask_option_is_disabled_for_parents_and_esc_steps_back() {
+        let (mut app, _rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('2'))); // work-1 has subtasks
+        app.handle(key(KeyCode::Char('m')));
+        assert_eq!(move_menu(&app).items[1].disabled, Some("it has subtasks"));
+        assert!(render(&mut app).contains("Change to subtask (it has subtasks)"));
+        app.handle(key(KeyCode::Down));
+        app.handle(key(KeyCode::Enter));
+        assert_eq!(move_menu(&app).step, MoveStep::Action);
+        assert_eq!(app.pending_count(), 0);
+
+        app.handle(key(KeyCode::Up));
+        app.handle(key(KeyCode::Enter));
+        assert_eq!(move_menu(&app).step, MoveStep::List);
+        assert!(render(&mut app).contains("Move 'Ship gtasks-tui' to list"));
+        app.handle(key(KeyCode::Esc));
+        assert_eq!(move_menu(&app).step, MoveStep::Action);
+        assert_eq!(move_menu(&app).list_state.selected(), Some(0));
+        app.handle(key(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_cross_list_move_restores_both_lists() {
+        let (mut app, mut rx) = loaded_app(Some(1)).await;
+        app.handle(key(KeyCode::Char('2')));
+        let work_before = rows_with_depth(&app.columns[1])
+            .into_iter()
+            .map(|(id, d)| (id.to_string(), d))
+            .collect::<Vec<_>>();
+        let inbox_before = app.columns[0].rows.clone();
+        for code in [KeyCode::Char('m'), KeyCode::Enter, KeyCode::Enter] {
+            app.handle(key(code));
+        }
+        assert!(app.columns[0].task("work-1").is_some());
+        settle(&mut app, &mut rx).await;
+        assert_eq!(app.columns[0].rows, inbox_before);
+        let work_after = rows_with_depth(&app.columns[1])
+            .into_iter()
+            .map(|(id, d)| (id.to_string(), d))
+            .collect::<Vec<_>>();
+        assert_eq!(work_after, work_before);
+        assert_eq!(app.status.as_ref().map(|s| s.level), Some(Level::Error));
+    }
+
+    #[tokio::test]
+    async fn task_in_flight_between_lists_cannot_be_changed_yet() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        for code in [KeyCode::Char('m'), KeyCode::Enter, KeyCode::Enter] {
+            app.handle(key(code));
+        }
+        app.handle(key(KeyCode::Char('2')));
+        assert_eq!(
+            app.focused_column().unwrap().selected.as_deref(),
+            Some("inbox-1")
+        );
+        for code in [KeyCode::Char(' '), KeyCode::Char('m'), KeyCode::Char('N')] {
+            app.handle(key(code));
+            assert!(matches!(app.mode, Mode::Normal));
+            assert_eq!(app.pending_count(), 1);
+        }
+        assert!(
+            app.status
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("still being moved")
+        );
+        // Nor can it be picked as a parent from its new list.
+        app.handle(key(KeyCode::Down));
+        app.handle(key(KeyCode::Char('m')));
+        let menu = move_menu(&app);
+        let parents = app.parent_items(menu);
+        assert!(
+            !parents
+                .iter()
+                .any(|i| i.choice == MoveChoice::Parent("inbox-1".into()))
+        );
+        settle(&mut app, &mut rx).await;
     }
 
     #[tokio::test]

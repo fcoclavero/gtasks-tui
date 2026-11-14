@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::time::MissedTickBehavior;
 
 use crate::backend::{BackendError, TasksBackend};
-use crate::model::{Task, TaskList, TaskPatch};
+use crate::model::{MoveTarget, Task, TaskList, TaskPatch};
 
 #[derive(Debug)]
 pub enum Msg {
@@ -66,6 +66,12 @@ pub enum Cmd {
         tasklist: String,
         task: String,
     },
+    Move {
+        op_id: u64,
+        tasklist: String,
+        task: String,
+        target: MoveTarget,
+    },
 }
 
 /// How `App` sends work out without knowing the backend type.
@@ -78,7 +84,8 @@ impl Cmd {
             Cmd::ListTasklists { .. } | Cmd::ListTasks { .. } => None,
             Cmd::Patch { tasklist, .. }
             | Cmd::Insert { tasklist, .. }
-            | Cmd::Delete { tasklist, .. } => Some(tasklist),
+            | Cmd::Delete { tasklist, .. }
+            | Cmd::Move { tasklist, .. } => Some(tasklist),
         }
     }
 }
@@ -168,6 +175,18 @@ async fn run_cmd<B: TasksBackend>(backend: &B, cmd: Cmd) -> Msg {
                 .await
                 .map(|_| OpOutcome::Deleted),
         },
+        Cmd::Move {
+            op_id,
+            tasklist,
+            task,
+            target,
+        } => Msg::OpDone {
+            op_id,
+            result: backend
+                .move_task(&tasklist, &task, &target)
+                .await
+                .map(|t| OpOutcome::Task(Box::new(t))),
+        },
     }
 }
 
@@ -242,6 +261,14 @@ mod tests {
         }
         async fn delete_task(&self, tasklist: &str, task: &str) -> BackendResult<()> {
             self.inner.delete_task(tasklist, task).await
+        }
+        async fn move_task(
+            &self,
+            tasklist: &str,
+            task: &str,
+            target: &MoveTarget,
+        ) -> BackendResult<Task> {
+            self.inner.move_task(tasklist, task, target).await
         }
     }
 

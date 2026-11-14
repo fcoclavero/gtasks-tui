@@ -6,7 +6,7 @@ pub mod mock;
 use std::future::Future;
 use std::time::Duration;
 
-use crate::model::{Task, TaskList, TaskPatch};
+use crate::model::{MoveTarget, Task, TaskList, TaskPatch};
 
 #[derive(thiserror::Error, Debug)]
 pub enum BackendError {
@@ -74,4 +74,10 @@ pub trait TasksBackend: Send + Sync + 'static {
         tasklist: &str,
         task: &str,
     ) -> impl Future<Output = BackendResult<()>> + Send;
+    fn move_task(
+        &self,
+        tasklist: &str,
+        task: &str,
+        target: &MoveTarget,
+    ) -> impl Future<Output = BackendResult<Task>> + Send;
 }
