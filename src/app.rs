@@ -10,7 +10,7 @@ use crossterm::event::{
 };
 use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{CursorMove, TextArea};
 
 use crate::backend::BackendError;
 use crate::browser;
@@ -103,7 +103,7 @@ impl Column {
             .count()
     }
 
-    pub fn rebuild_rows(&mut self, show_completed: bool, sort_mode: SortMode) {
+    pub fn rebuild_rows(&mut self, show_completed: bool, sort_mode: SortMode, filter: &str) {
         if let Some(p) = &self.pinned
             && !self.tasks.iter().any(|t| &t.id == p)
         {
@@ -114,6 +114,7 @@ impl Column {
             show_completed,
             self.pinned.as_deref(),
             sort_mode,
+            filter,
         );
         match self.selected_index() {
             Some(i) => self.last_index = i,
@@ -148,8 +149,13 @@ impl Column {
     fn row_at(&self, y: u16) -> Option<usize> {
         let offset = self.list_state.offset();
         let mut top = self.list_area.y;
-        for index in offset..self.visible_end(offset) {
-            let height = self.row_heights[index];
+        for (index, &height) in self
+            .row_heights
+            .iter()
+            .enumerate()
+            .take(self.visible_end(offset))
+            .skip(offset)
+        {
             if (top..top + height).contains(&y) {
                 return Some(index);
             }
@@ -161,7 +167,7 @@ impl Column {
     /// Scroll the list by `delta` rows, stopping once the last row is in view.
     /// The selection stays put unless it would leave the screen, in which case
     /// it moves to the nearest row still visible.
-    fn scroll_by(&mut self, delta: isize, show_completed: bool, sort_mode: SortMode) {
+    fn scroll_by(&mut self, delta: isize, show_completed: bool, sort_mode: SortMode, filter: &str) {
         let viewport = usize::from(self.list_area.height);
         // The smallest offset that shows the last row.
         let mut max_offset = self.row_heights.len();
@@ -193,12 +199,18 @@ impl Column {
         {
             let target = selected.clamp(offset, end - 1);
             if target != selected {
-                self.select_row(target, show_completed, sort_mode);
+                self.select_row(target, show_completed, sort_mode, filter);
             }
         }
     }
 
-    fn select_row(&mut self, index: usize, show_completed: bool, sort_mode: SortMode) {
+    fn select_row(
+        &mut self,
+        index: usize,
+        show_completed: bool,
+        sort_mode: SortMode,
+        filter: &str,
+    ) {
         let Some(target) = self.rows.get(index).map(|r| r.task_id.clone()) else {
             return;
         };
@@ -207,17 +219,17 @@ impl Column {
         }
         self.selected = Some(target);
         self.last_index = index;
-        self.rebuild_rows(show_completed, sort_mode);
+        self.rebuild_rows(show_completed, sort_mode, filter);
     }
 
-    fn move_by(&mut self, delta: isize, show_completed: bool, sort_mode: SortMode) {
+    fn move_by(&mut self, delta: isize, show_completed: bool, sort_mode: SortMode, filter: &str) {
         if self.rows.is_empty() {
             return;
         }
         let current = self.selected_index().unwrap_or(0) as isize;
         let max = self.rows.len() as isize - 1;
         let target = (current + delta).clamp(0, max) as usize;
-        self.select_row(target, show_completed, sort_mode);
+        self.select_row(target, show_completed, sort_mode, filter);
     }
 
     /// Before `prev` and its children leave this column: select the next
@@ -255,9 +267,9 @@ impl Column {
         Some((task, children))
     }
 
-    fn leave(&mut self, show_completed: bool, sort_mode: SortMode) {
+    fn leave(&mut self, show_completed: bool, sort_mode: SortMode, filter: &str) {
         if self.pinned.take().is_some() {
-            self.rebuild_rows(show_completed, sort_mode);
+            self.rebuild_rows(show_completed, sort_mode, filter);
         }
     }
 }
@@ -340,10 +352,18 @@ impl MoveMenuState {
     }
 }
 
+pub struct FilterState {
+    pub input: TextArea<'static>,
+    pub area: Rect,
+    previous: String,
+    dragging: bool,
+}
+
 pub enum Mode {
     Normal,
     Details(Box<DetailsState>),
     NewTask(Box<NewTaskState>),
+    Filter(Box<FilterState>),
     ConfirmDelete {
         tasklist_id: String,
         task_id: String,
@@ -421,6 +441,7 @@ pub struct App {
     pub col_offset: usize,
     pub show_completed: bool,
     pub sort_mode: SortMode,
+    pub filter: String,
     pub mode: Mode,
     pub last_refresh: Option<DateTime<Local>>,
     pub account_hint: String,
@@ -447,6 +468,7 @@ impl App {
             col_offset: 0,
             show_completed: false,
             sort_mode: SortMode::default(),
+            filter: String::new(),
             mode: Mode::Normal,
             last_refresh: None,
             account_hint: account_hint(),
@@ -475,10 +497,6 @@ impl App {
 
     pub fn focused_column(&self) -> Option<&Column> {
         self.columns.get(self.focused)
-    }
-
-    fn focused_column_mut(&mut self) -> Option<&mut Column> {
-        self.columns.get_mut(self.focused)
     }
 
     /// Status message still worth showing (info messages expire).
@@ -643,7 +661,7 @@ impl App {
                     Ok(tasks) => {
                         column.tasks = tasks;
                         column.error = None;
-                        column.rebuild_rows(show_completed, self.sort_mode);
+                        column.rebuild_rows(show_completed, self.sort_mode, &self.filter);
                     }
                     Err(err) => {
                         column.error = Some(err.user_message());
@@ -726,6 +744,7 @@ impl App {
             });
             if let Some(text) = selection {
                 self.copy_to_clipboard(&text);
+                self.sync_filter();
                 return;
             }
             if key.code == KeyCode::Char('c') {
@@ -738,6 +757,7 @@ impl App {
             Mode::Help => self.mode = Mode::Normal,
             Mode::Details(_) => self.on_key_details(key),
             Mode::NewTask(_) => self.on_key_new_task(key),
+            Mode::Filter(_) => self.on_key_filter(key),
             Mode::ConfirmDelete { .. } => self.on_key_confirm_delete(key),
             Mode::Move(_) => self.on_key_move(key),
         }
@@ -748,6 +768,8 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Char('f') => self.open_filter(),
+            KeyCode::Esc => self.set_filter(String::new()),
             KeyCode::Left | KeyCode::Char('h') => self.focus_by(-1),
             KeyCode::Right | KeyCode::Char('l') => self.focus_by(1),
             KeyCode::Char(number @ '1'..='9') => self.focus_column((number as u8 - b'1') as usize),
@@ -764,7 +786,7 @@ impl App {
                 let show = self.show_completed;
                 for column in &mut self.columns {
                     column.pinned = None;
-                    column.rebuild_rows(show, self.sort_mode);
+                    column.rebuild_rows(show, self.sort_mode, &self.filter);
                 }
             }
             KeyCode::Char('s') => {
@@ -773,7 +795,7 @@ impl App {
                     SortMode::DueDate => SortMode::Position,
                 };
                 for column in &mut self.columns {
-                    column.rebuild_rows(show_completed, self.sort_mode);
+                    column.rebuild_rows(show_completed, self.sort_mode, &self.filter);
                 }
             }
             KeyCode::Char('n') => self.open_new_task(false),
@@ -802,6 +824,7 @@ impl App {
                 Field::Due => None,
             },
             Mode::NewTask(state) => Some(&mut state.input),
+            Mode::Filter(state) => Some(&mut state.input),
             _ => None,
         }
     }
@@ -830,6 +853,17 @@ impl App {
                     state.dragging = false;
                 }
             }
+            Mode::Filter(state) => {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    state.dragging = state.area.contains(Position::new(mouse.column, mouse.row));
+                }
+                if state.dragging {
+                    text_input::mouse(&mut state.input, state.area, mouse);
+                }
+                if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                    state.dragging = false;
+                }
+            }
             Mode::Normal => {
                 let position = Position::new(mouse.column, mouse.row);
                 match mouse.kind {
@@ -847,7 +881,7 @@ impl App {
     fn scroll_at(&mut self, position: Position, delta: isize) {
         let (show_completed, sort_mode) = (self.show_completed, self.sort_mode);
         if let Some(column) = self.columns.iter_mut().find(|c| c.area.contains(position)) {
-            column.scroll_by(delta, show_completed, sort_mode);
+            column.scroll_by(delta, show_completed, sort_mode, &self.filter);
         }
     }
 
@@ -864,7 +898,7 @@ impl App {
         let Some(row) = column.row_at(position.y) else {
             return;
         };
-        column.select_row(row, show_completed, sort_mode);
+        column.select_row(row, show_completed, sort_mode, &self.filter);
         // Selecting can rebuild the rows (dropping a pinned task), so read the id back.
         let Some(task_id) = column.selected.clone() else {
             return;
@@ -926,6 +960,61 @@ impl App {
         }
     }
 
+    fn open_filter(&mut self) {
+        let mut input = TextArea::new(vec![self.filter.clone()]);
+        input.move_cursor(CursorMove::End);
+        input.set_cursor_line_style(ratatui::style::Style::default());
+        input.set_placeholder_text("Filter titles and notes across all lists");
+        self.mode = Mode::Filter(Box::new(FilterState {
+            input,
+            area: Rect::default(),
+            previous: self.filter.clone(),
+            dragging: false,
+        }));
+        self.last_click = None;
+    }
+
+    fn on_key_filter(&mut self, key: KeyEvent) {
+        let Mode::Filter(state) = &mut self.mode else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                let previous = state.previous.clone();
+                self.mode = Mode::Normal;
+                self.set_filter(previous);
+            }
+            KeyCode::Enter => self.mode = Mode::Normal,
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('\n' | '\r') => {}
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.input.clear();
+                self.sync_filter();
+            }
+            KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
+            _ => {
+                text_input::input(&mut state.input, key);
+                self.sync_filter();
+            }
+        }
+    }
+
+    fn sync_filter(&mut self) {
+        if let Mode::Filter(state) = &self.mode {
+            self.set_filter(state.input.lines().join(" "));
+        }
+    }
+
+    fn set_filter(&mut self, filter: String) {
+        if self.filter == filter {
+            return;
+        }
+        self.filter = filter;
+        for column in &mut self.columns {
+            column.pinned = None;
+            column.rebuild_rows(self.show_completed, self.sort_mode, &self.filter);
+        }
+    }
+
     fn on_key_confirm_delete(&mut self, key: KeyEvent) {
         let Mode::ConfirmDelete {
             tasklist_id,
@@ -962,8 +1051,8 @@ impl App {
         }
         let show_completed = self.show_completed;
         let sort_mode = self.sort_mode;
-        if let Some(column) = self.focused_column_mut() {
-            column.leave(show_completed, sort_mode);
+        if let Some(column) = self.columns.get_mut(self.focused) {
+            column.leave(show_completed, sort_mode, &self.filter);
         }
         self.focused = target;
     }
@@ -971,8 +1060,8 @@ impl App {
     fn move_by(&mut self, delta: isize) {
         let show_completed = self.show_completed;
         let sort_mode = self.sort_mode;
-        if let Some(column) = self.focused_column_mut() {
-            column.move_by(delta, show_completed, sort_mode);
+        if let Some(column) = self.columns.get_mut(self.focused) {
+            column.move_by(delta, show_completed, sort_mode, &self.filter);
         }
     }
 
@@ -1013,14 +1102,14 @@ impl App {
         let patch = TaskPatch::status(new_status);
         let show_completed = self.show_completed;
         let sort_mode = self.sort_mode;
-        if let Some(column) = self.focused_column_mut() {
+        if let Some(column) = self.columns.get_mut(self.focused) {
             if let Some(task) = column.task_mut(&prev.id) {
                 patch.apply(task);
             }
             if new_status == TaskStatus::Completed && !show_completed {
                 column.pinned = Some(prev.id.clone());
             }
-            column.rebuild_rows(show_completed, sort_mode);
+            column.rebuild_rows(show_completed, sort_mode, &self.filter);
         }
         let task_id = prev.id.clone();
         let list_for_cmd = tasklist_id.clone();
@@ -1050,7 +1139,7 @@ impl App {
         };
         let prev = task.clone();
         patch.apply(task);
-        column.rebuild_rows(show_completed, self.sort_mode);
+        column.rebuild_rows(show_completed, self.sort_mode, &self.filter);
         let list_for_cmd = tasklist_id.clone();
         self.submit(tasklist_id, Op::Edit { prev }, move |op_id| Cmd::Patch {
             op_id,
@@ -1141,7 +1230,7 @@ impl App {
         ));
         column.selected = Some(temp_id.clone());
         column.pinned = None;
-        column.rebuild_rows(show_completed, self.sort_mode);
+        column.rebuild_rows(show_completed, self.sort_mode, &self.filter);
         let list_for_cmd = tasklist_id.clone();
         self.submit(tasklist_id, Op::Create { temp_id }, move |op_id| {
             Cmd::Insert {
@@ -1184,7 +1273,7 @@ impl App {
             return;
         };
         column.select_survivor(&prev, &prev_children);
-        column.rebuild_rows(show_completed, self.sort_mode);
+        column.rebuild_rows(show_completed, self.sort_mode, &self.filter);
 
         let list_for_cmd = tasklist_id.clone();
         self.submit(
@@ -1406,7 +1495,7 @@ impl App {
             (Some(destination), Some(dest_title)) => {
                 let (prev, prev_children) = column.take_with_children(&task_id).unwrap();
                 column.select_survivor(&prev, &prev_children);
-                column.rebuild_rows(show_completed, sort_mode);
+                column.rebuild_rows(show_completed, sort_mode, &self.filter);
                 let mut moved = prev.clone();
                 moved.parent = None;
                 moved.position = FIRST_POSITION.to_string();
@@ -1418,7 +1507,7 @@ impl App {
                 dest.tasks.push(moved);
                 dest.tasks.extend(prev_children.iter().cloned());
                 dest.selected = Some(task_id.clone());
-                dest.rebuild_rows(show_completed, sort_mode);
+                dest.rebuild_rows(show_completed, sort_mode, &self.filter);
                 self.info(format!("moved '{}' to {dest_title}", prev.title));
                 Op::Move {
                     prev,
@@ -1440,7 +1529,7 @@ impl App {
                 let prev = task.clone();
                 task.parent = target.parent.clone();
                 task.position = previous_position.unwrap_or_else(|| FIRST_POSITION.to_string());
-                column.rebuild_rows(show_completed, sort_mode);
+                column.rebuild_rows(show_completed, sort_mode, &self.filter);
                 Op::Move {
                     prev,
                     prev_children: Vec::new(),
@@ -1480,7 +1569,7 @@ impl App {
                     if let Some(task) = column.task_mut(&prev.id) {
                         *task = *server;
                     }
-                    column.rebuild_rows(show_completed, sort_mode);
+                    column.rebuild_rows(show_completed, sort_mode, &self.filter);
                 }
             }
             Err(err) => {
@@ -1488,7 +1577,7 @@ impl App {
                     && let Some(column) = self.columns.iter_mut().find(|c| &c.list.id == dest)
                 {
                     column.take_with_children(&prev.id);
-                    column.rebuild_rows(show_completed, sort_mode);
+                    column.rebuild_rows(show_completed, sort_mode, &self.filter);
                 }
                 if let Some(column) = self.columns.iter_mut().find(|c| c.list.id == tasklist_id) {
                     match column.task_mut(&prev.id) {
@@ -1498,7 +1587,7 @@ impl App {
                             column.tasks.extend(prev_children);
                         }
                     }
-                    column.rebuild_rows(show_completed, sort_mode);
+                    column.rebuild_rows(show_completed, sort_mode, &self.filter);
                 }
                 self.error(&err);
             }
@@ -1575,7 +1664,7 @@ impl App {
                 ) => {}
                 (_, Op::Move { .. }) => unreachable!("moves settle in on_move_done"),
             }
-            column.rebuild_rows(show_completed, self.sort_mode);
+            column.rebuild_rows(show_completed, self.sort_mode, &self.filter);
         }
         if let Some(err) = failure {
             self.error(&err);
@@ -1641,6 +1730,264 @@ mod tests {
         app.focused_column()
             .map(|c| c.rows.iter().map(|r| r.task_id.clone()).collect())
             .unwrap_or_default()
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            app.handle(key(KeyCode::Char(ch)));
+        }
+    }
+
+    #[tokio::test]
+    async fn filter_updates_all_lists_live_and_can_be_applied_edited_and_cleared() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        let original: Vec<_> = app.columns.iter().map(|c| c.rows.clone()).collect();
+        let tasks: Vec<_> = app.columns.iter().map(|c| c.tasks.clone()).collect();
+        app.handle(key(KeyCode::Char('f')));
+        assert!(matches!(app.mode, Mode::Filter(_)));
+        type_text(&mut app, "  WRITE  ");
+        assert!(app.columns[0].rows.is_empty());
+        assert_eq!(app.columns[1].rows.len(), 2);
+        assert_eq!(app.columns[1].rows[0].task_id, "work-1");
+        assert!(app.columns[1].rows[0].ghost);
+        assert_eq!(app.columns[1].rows[1].task_id, "work-1c");
+        app.handle(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Normal));
+        app.handle(key(KeyCode::Right));
+        app.handle(key(KeyCode::Down));
+        assert_eq!(app.columns[1].selected.as_deref(), Some("work-1c"));
+        app.handle(key(KeyCode::Char('f')));
+        let Mode::Filter(state) = &app.mode else {
+            panic!("expected filter editor");
+        };
+        assert_eq!(state.input.lines(), &["  WRITE  "]);
+        app.handle(Msg::Input(Event::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(app.filter.is_empty());
+        type_text(&mut app, "chapters");
+        assert_eq!(app.columns[0].rows[0].task_id, "inbox-3");
+        assert!(app.columns[1].rows.is_empty());
+        app.handle(key(KeyCode::Esc));
+        assert_eq!(app.filter, "  WRITE  ");
+        assert_eq!(row_ids(&app), vec!["work-1", "work-1c"]);
+        app.handle(key(KeyCode::Esc));
+        assert!(app.filter.is_empty());
+        for (i, column) in app.columns.iter().enumerate() {
+            assert_eq!(column.rows, original[i]);
+            assert_eq!(column.tasks, tasks[i]);
+        }
+        assert_eq!(app.pending_count(), 0);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn filter_respects_completed_toggle_sorting_refresh_and_empty_selection() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('f')));
+        type_text(&mut app, "write");
+        app.handle(key(KeyCode::Enter));
+        app.handle(key(KeyCode::Char('2')));
+        app.handle(key(KeyCode::Char('c')));
+        assert_eq!(row_ids(&app), vec!["work-1", "work-1a", "work-1c"]);
+        app.handle(key(KeyCode::Char('s')));
+        app.handle(key(KeyCode::End));
+        assert_eq!(app.columns[1].selected.as_deref(), Some("work-1c"));
+        let before = row_ids(&app);
+        app.start_refresh();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(row_ids(&app), before);
+        assert_eq!(app.columns[1].selected.as_deref(), Some("work-1c"));
+        app.handle(key(KeyCode::Char('1')));
+        for code in [
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+            KeyCode::Char('d'),
+        ] {
+            app.handle(key(code));
+        }
+        assert!(app.columns[0].selected.is_none());
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.pending_count(), 0);
+        assert_eq!(app.filter, "write");
+    }
+
+    #[tokio::test]
+    async fn filter_selected_before_loading_applies_to_new_columns_and_cancel_restores_rows() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let backend = Arc::new(MockBackend::seeded(Duration::ZERO, None));
+        let mut app = App::new(dispatcher(backend, tx));
+        app.handle(key(KeyCode::Char('f')));
+        type_text(&mut app, "dentist");
+        app.start_refresh();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(row_ids(&app), vec!["inbox-2"]);
+        assert!(app.columns[1].rows.is_empty());
+        app.handle(key(KeyCode::Esc));
+        assert!(app.filter.is_empty());
+        assert_eq!(row_ids(&app).len(), 5);
+    }
+
+    #[tokio::test]
+    async fn filter_keys_stay_in_the_input_and_single_line_editing_updates_matches() {
+        let (mut app, _rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('f')));
+        type_text(&mut app, "qsf19");
+        assert!(!app.should_quit);
+        assert_eq!(app.sort_mode, SortMode::Position);
+        assert_eq!(app.focused, 0);
+        app.handle(key(KeyCode::Tab));
+        for ch in ['j', 'm', 'u'] {
+            app.handle(Msg::Input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::CONTROL,
+            ))));
+        }
+        type_text(&mut app, "dentistx");
+        assert!(row_ids(&app).is_empty());
+        app.handle(key(KeyCode::Backspace));
+        assert_eq!(row_ids(&app), vec!["inbox-2"]);
+        let Mode::Filter(state) = &app.mode else {
+            panic!("expected filter editor");
+        };
+        assert_eq!(state.input.lines(), &["dentist"]);
+    }
+
+    #[tokio::test]
+    async fn filtered_edits_reapply_filter_and_failed_edits_restore_matching_task() {
+        for fail_every in [None, Some(1)] {
+            let (mut app, mut rx) = loaded_app(fail_every).await;
+            app.handle(key(KeyCode::Char('f')));
+            type_text(&mut app, "dentist");
+            app.handle(key(KeyCode::Enter));
+            app.handle(key(KeyCode::Enter));
+            let Mode::Details(details) = &app.mode else {
+                panic!("expected task editor");
+            };
+            assert_eq!(details.task_id, "inbox-2");
+            app.apply_edit(
+                "list-inbox".into(),
+                "inbox-2".into(),
+                TaskPatch {
+                    title: Some("Call doctor".into()),
+                    ..Default::default()
+                },
+            );
+            app.mode = Mode::Normal;
+            assert!(row_ids(&app).is_empty());
+            settle(&mut app, &mut rx).await;
+            assert_eq!(
+                row_ids(&app),
+                if fail_every.is_some() {
+                    vec!["inbox-2"]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(app.filter, "dentist");
+        }
+    }
+
+    #[tokio::test]
+    async fn filtered_cross_list_moves_keep_both_lists_filtered_and_restore_on_failure() {
+        for fail_every in [None, Some(1)] {
+            let (mut app, mut rx) = loaded_app(fail_every).await;
+            app.handle(key(KeyCode::Char('f')));
+            type_text(&mut app, "write");
+            for code in [
+                KeyCode::Enter,
+                KeyCode::Char('2'),
+                KeyCode::End,
+                KeyCode::Char('m'),
+                KeyCode::Enter,
+                KeyCode::Enter,
+            ] {
+                app.handle(key(code));
+            }
+            assert!(app.columns[1].rows.is_empty());
+            assert_eq!(app.columns[0].rows.len(), 1);
+            assert_eq!(app.columns[0].rows[0].task_id, "work-1c");
+            settle(&mut app, &mut rx).await;
+            assert_eq!(app.filter, "write");
+            if fail_every.is_some() {
+                assert!(app.columns[0].rows.is_empty());
+                assert_eq!(row_ids(&app), vec!["work-1", "work-1c"]);
+                assert!(app.columns[1].rows[0].ghost);
+            } else {
+                assert!(app.columns[1].rows.is_empty());
+                assert_eq!(app.columns[0].rows.len(), 1);
+                assert_eq!(app.columns[0].rows[0].task_id, "work-1c");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn filtered_move_out_of_parent_removes_unmatched_parent_context() {
+        let (mut app, mut rx) = loaded_app(None).await;
+        app.handle(key(KeyCode::Char('f')));
+        type_text(&mut app, "write");
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char('2'),
+            KeyCode::End,
+            KeyCode::Char('m'),
+            KeyCode::Down,
+            KeyCode::Enter,
+        ] {
+            app.handle(key(code));
+        }
+        assert_eq!(row_ids(&app), vec!["work-1c"]);
+        assert_eq!(app.columns[1].rows[0].depth, 0);
+        settle(&mut app, &mut rx).await;
+        assert_eq!(row_ids(&app), vec!["work-1c"]);
+        assert_eq!(app.filter, "write");
+        assert_eq!(app.columns[1].selected.as_deref(), Some("work-1c"));
+    }
+
+    #[tokio::test]
+    async fn filter_input_matches_count_empty_state_and_help_are_rendered() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, _rx) = loaded_app(None).await;
+        let mut terminal = Terminal::new(TestBackend::new(180, 30)).unwrap();
+        for (code, expected) in [
+            (KeyCode::Char('f'), "Filter titles and notes"),
+            (KeyCode::Char('x'), "filter: x (1)"),
+            (KeyCode::Char('z'), "filter: xz (0)"),
+            (KeyCode::Enter, "Esc: clear"),
+            (KeyCode::Esc, "f: filter"),
+            (KeyCode::Char('?'), "filter titles and notes / clear filter"),
+        ] {
+            app.handle(key(code));
+            terminal
+                .draw(|frame| crate::ui::draw(frame, &mut app))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains(expected), "expected {expected}");
+            if app.filter == "xz" {
+                assert!(text.contains("(no matches)"));
+            }
+        }
+        app.mode = Mode::Normal;
+        app.handle(key(KeyCode::Char('f')));
+        for (width, height) in [(28, 8), (20, 4), (10, 2), (1, 1)] {
+            terminal.backend_mut().resize(width, height);
+            terminal
+                .draw(|frame| crate::ui::draw(frame, &mut app))
+                .unwrap();
+        }
     }
 
     #[test]

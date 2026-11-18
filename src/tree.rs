@@ -1,6 +1,6 @@
 //! Builds the parent/subtask tree from the flat API list and flattens it into
-//! the rows a column renders, applying the completed filter and the done-grace
-//! ("pinned") rule.
+//! the rows a column renders, applying text and completed filters and the
+//! done-grace ("pinned") rule.
 
 use std::collections::{HashMap, HashSet};
 
@@ -23,13 +23,14 @@ pub struct Row {
     pub ghost: bool,
 }
 
-/// `pinned` is a task that stays visible even when completed and filtered,
+/// `pinned` is a task that stays visible even when completed tasks are hidden,
 /// so a just-completed task can be undone before the cursor moves away.
 pub fn flatten(
     tasks: &[Task],
     show_completed: bool,
     pinned: Option<&str>,
     sort_mode: SortMode,
+    filter: &str,
 ) -> Vec<Row> {
     let live: Vec<&Task> = tasks.iter().filter(|t| !t.deleted).collect();
     let by_id: HashMap<&str, &Task> = live.iter().map(|t| (t.id.as_str(), *t)).collect();
@@ -47,7 +48,15 @@ pub fn flatten(
         sort_siblings(siblings, sort_mode);
     }
 
-    let visible = |t: &Task| show_completed || !t.is_completed() || pinned == Some(t.id.as_str());
+    let filter = filter.trim().to_lowercase();
+    let visible = |t: &Task| {
+        (show_completed || !t.is_completed() || pinned == Some(t.id.as_str()))
+            && (filter.is_empty()
+                || t.title.to_lowercase().contains(&filter)
+                || t.notes
+                    .as_deref()
+                    .is_some_and(|notes| notes.to_lowercase().contains(&filter)))
+    };
 
     let mut rows = Vec::new();
     for root in roots {
@@ -129,6 +138,68 @@ mod tests {
     }
 
     #[test]
+    fn text_filter_matches_titles_and_notes_ignoring_case_and_outer_whitespace() {
+        let mut notes = task("notes", "Call dentist", "2", None, false);
+        notes.notes = Some("Ask about CAFÉ opening hours".into());
+        let mut deleted = task("deleted", "Café", "0", None, false);
+        deleted.deleted = true;
+        let tasks = vec![
+            task("title", "Visit the café", "1", None, false),
+            notes,
+            task("other", "Other", "3", None, false),
+            deleted,
+        ];
+        assert_eq!(
+            ids(&flatten(
+                &tasks,
+                false,
+                None,
+                SortMode::Position,
+                "  CAFÉ  "
+            )),
+            vec![("title", 0, false), ("notes", 0, false)]
+        );
+        assert!(flatten(&tasks, false, None, SortMode::Position, "missing").is_empty());
+        assert_eq!(
+            flatten(&tasks, false, None, SortMode::Position, " \t "),
+            flatten(&tasks, false, None, SortMode::Position, "")
+        );
+    }
+
+    #[test]
+    fn text_filter_keeps_parent_context_and_respects_completed_visibility() {
+        let tasks = vec![
+            task("parent", "Project", "1", None, false),
+            task("child", "Write README", "1", Some("parent"), false),
+            task("done", "Write plan", "2", Some("parent"), true),
+            task("other", "Collect metrics", "3", Some("parent"), false),
+        ];
+        assert_eq!(
+            ids(&flatten(&tasks, false, None, SortMode::Position, "write")),
+            vec![("parent", 0, true), ("child", 1, false)]
+        );
+        assert_eq!(
+            ids(&flatten(&tasks, true, None, SortMode::Position, "write")),
+            vec![("parent", 0, true), ("child", 1, false), ("done", 1, false)]
+        );
+        assert_eq!(
+            ids(&flatten(&tasks, false, None, SortMode::Position, "project")),
+            vec![("parent", 0, false)]
+        );
+        assert_eq!(
+            ids(&flatten(
+                &tasks,
+                false,
+                Some("done"),
+                SortMode::Position,
+                "plan"
+            )),
+            vec![("parent", 0, true), ("done", 1, false)]
+        );
+        assert!(flatten(&tasks, false, Some("done"), SortMode::Position, "absent").is_empty());
+    }
+
+    #[test]
     fn due_sort_orders_dates_across_years_and_keeps_position_ties() {
         let tasks: Vec<_> = [
             ("undated", "0", None),
@@ -146,7 +217,7 @@ mod tests {
         })
         .collect();
         assert_eq!(
-            ids(&flatten(&tasks, false, None, SortMode::DueDate)),
+            ids(&flatten(&tasks, false, None, SortMode::DueDate, "")),
             vec![
                 ("overdue", 0, false),
                 ("same-first", 0, false),
@@ -171,7 +242,7 @@ mod tests {
         other.due = Some("2026-10-05T00:00:00.000Z".into());
         let tasks = vec![parent, undated_child, later_child, earlier_child, other];
         assert_eq!(
-            ids(&flatten(&tasks, false, None, SortMode::DueDate)),
+            ids(&flatten(&tasks, false, None, SortMode::DueDate, "")),
             vec![
                 ("other", 0, false),
                 ("parent", 0, false),
@@ -190,7 +261,7 @@ mod tests {
             task("a2", "A2", "2", Some("a"), false),
             task("a1", "A1", "1", Some("a"), false),
         ];
-        let rows = flatten(&tasks, false, None, SortMode::Position);
+        let rows = flatten(&tasks, false, None, SortMode::Position, "");
         assert_eq!(
             ids(&rows),
             vec![
@@ -209,15 +280,15 @@ mod tests {
             task("b", "B", "2", None, false),
         ];
         assert_eq!(
-            ids(&flatten(&tasks, false, None, SortMode::Position)),
+            ids(&flatten(&tasks, false, None, SortMode::Position, "")),
             vec![("b", 0, false)]
         );
         assert_eq!(
-            ids(&flatten(&tasks, true, None, SortMode::Position)),
+            ids(&flatten(&tasks, true, None, SortMode::Position, "")),
             vec![("a", 0, false), ("b", 0, false)]
         );
         assert_eq!(
-            ids(&flatten(&tasks, false, Some("a"), SortMode::Position)),
+            ids(&flatten(&tasks, false, Some("a"), SortMode::Position, "")),
             vec![("a", 0, false), ("b", 0, false)]
         );
     }
@@ -231,7 +302,7 @@ mod tests {
             task("qc", "QC", "1", Some("q"), true),
         ];
         assert_eq!(
-            ids(&flatten(&tasks, false, None, SortMode::Position)),
+            ids(&flatten(&tasks, false, None, SortMode::Position, "")),
             vec![("p", 0, true), ("c", 1, false)]
         );
     }
@@ -247,7 +318,7 @@ mod tests {
         let mut all = tasks;
         all.push(deleted);
         assert_eq!(
-            ids(&flatten(&all, false, None, SortMode::Position)),
+            ids(&flatten(&all, false, None, SortMode::Position, "")),
             vec![("d", 0, false), ("c", 0, false)]
         );
     }
@@ -259,7 +330,7 @@ mod tests {
             task("c", "C", "1", Some("r"), false),
             task("g", "G", "1", Some("c"), false),
         ];
-        let rows = flatten(&tasks, false, None, SortMode::Position);
+        let rows = flatten(&tasks, false, None, SortMode::Position, "");
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r.depth <= 1));
     }

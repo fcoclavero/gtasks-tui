@@ -70,7 +70,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App, today: NaiveDate) {
             index,
             index == focused,
             today,
-            (marker_left, marker_right),
+            (marker_left, marker_right, !app.filter.trim().is_empty()),
         );
     }
 }
@@ -82,7 +82,7 @@ fn draw_column(
     index: usize,
     focused: bool,
     today: NaiveDate,
-    (more_left, more_right): (bool, bool),
+    (more_left, more_right, filtering): (bool, bool, bool),
 ) {
     let mut title = if index < 9 {
         format!(" [{}] {}", index + 1, column.list.title)
@@ -121,6 +121,8 @@ fn draw_column(
             Paragraph::new(err.as_str()).red().wrap(Wrap { trim: true })
         } else if column.loading {
             Paragraph::new("loading...").dim()
+        } else if filtering {
+            Paragraph::new("(no matches)").dim()
         } else {
             Paragraph::new("(empty)").dim()
         };
@@ -278,7 +280,7 @@ mod tests {
             list_area: Rect::default(),
             row_heights: Vec::new(),
         };
-        column.rebuild_rows(false, crate::tree::SortMode::Position);
+        column.rebuild_rows(false, crate::tree::SortMode::Position, "");
         column
     }
 
@@ -296,7 +298,7 @@ mod tests {
                     0,
                     focused,
                     NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(),
-                    (false, false),
+                    (false, false, false),
                 );
             })
             .unwrap();
@@ -610,7 +612,7 @@ mod tests {
         completed.status = TaskStatus::Completed;
         completed.notes = Some("Appointment notes".into());
         let mut column = column(vec![normal, overdue, completed]);
-        column.rebuild_rows(true, crate::tree::SortMode::Position);
+        column.rebuild_rows(true, crate::tree::SortMode::Position, "");
         let mut terminal = Terminal::new(TestBackend::new(28, 24)).unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
 

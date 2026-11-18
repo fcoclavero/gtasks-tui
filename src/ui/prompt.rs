@@ -5,9 +5,20 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::{centered, fit};
-use crate::app::{MoveMenuState, MoveStep, NewTaskState};
+use crate::app::{FilterState, MoveMenuState, MoveStep, NewTaskState};
 
 const MOVE_MENU_WIDTH: u16 = 60;
+
+pub fn draw_filter(frame: &mut Frame, area: Rect, state: &mut FilterState) {
+    state.input.set_block(
+        Block::bordered()
+            .title(" Filter titles and notes ")
+            .title_bottom(Line::from(" Enter: apply | Esc: cancel | Ctrl-U: clear ").dim())
+            .border_style(Style::new().fg(Color::Cyan)),
+    );
+    state.area = area;
+    frame.render_widget(&state.input, area);
+}
 
 pub fn draw_new_task(frame: &mut Frame, area: Rect, state: &mut NewTaskState) {
     let popup = centered(area, 70, 3);

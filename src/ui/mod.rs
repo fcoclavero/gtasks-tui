@@ -19,12 +19,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let today = dates::today();
     let [main, status_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    let [main, filter_area] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(if matches!(app.mode, Mode::Filter(_)) {
+            3
+        } else {
+            0
+        }),
+    ])
+    .areas(main);
 
     columns::draw(frame, main, app, today);
     match &mut app.mode {
         Mode::Normal => {}
         Mode::Details(details) => details::draw(frame, main, details),
         Mode::NewTask(state) => prompt::draw_new_task(frame, main, state),
+        Mode::Filter(state) => prompt::draw_filter(frame, filter_area, state),
         Mode::ConfirmDelete {
             title,
             subtask_count,

@@ -17,6 +17,7 @@ const KEYS: &[(&str, &str)] = &[
     ("Enter", "edit title, due date, notes"),
     ("c", "show / hide completed tasks"),
     ("s", "sort by position / due date"),
+    ("f / Esc", "filter titles and notes / clear filter"),
     ("n / N", "new task / new subtask under selection"),
     ("Tab (new)", "create as subtask under selection"),
     ("m", "move to another list / in or out of a parent"),

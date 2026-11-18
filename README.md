@@ -52,6 +52,8 @@ Completed tasks are hidden by default. The column title shows the number of open
 
 Press `s` to toggle all lists between Google's position order (the default) and due-date order, earliest first, with undated tasks last. Subtasks stay under their parent and are sorted by their own dates. Tasks with the same date keep their position order. The status bar shows the active sort mode; sorting only changes the display, not Google's stored order.
 
+Press `f` to filter tasks across all lists by title or notes. Matches update as you type, ignoring case and surrounding whitespace. Matching subtasks keep their parent visible, dimmed when it does not match. The completed-task setting still applies. Press `Enter` to keep the filter and return to navigation, or `Esc` to cancel editing and restore the previous filter. Press `f` again to edit it, `Ctrl-U` in the filter field to clear it, or `Esc` during normal navigation to clear the applied filter. The status bar shows the active filter and match count.
+
 ## Keys
 
 | Key | Action |
@@ -66,6 +68,7 @@ Press `s` to toggle all lists between Google's position order (the default) and 
 | `Enter` | Edit title, due date, and notes. Links are shown read-only. |
 | `c` | Show / hide completed tasks |
 | `s` | Toggle position / due-date sorting |
+| `f` / `Esc` | Filter titles and notes / clear the applied filter |
 | `n` `N` | New task / new subtask under the selected task |
 | `m` | Move the selected task: to another list, under a top-level task, or out of its parent |
 | `d` `D` | Delete the selected task and its subtasks, after confirmation |

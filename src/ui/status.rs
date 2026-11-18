@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::app::{App, Level};
+use crate::app::{App, Level, Mode};
 use crate::tree::SortMode;
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
@@ -23,13 +23,31 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         SortMode::Position => "sort: position",
         SortMode::DueDate => "sort: due date",
     };
-    let mut spans = vec![
-        Span::styled(
-            format!(" {} ", app.account_hint),
-            Style::new().fg(Color::Black).bg(Color::Cyan),
-        ),
-        Span::raw(format!(" {refreshed} │ {done} │ {sort}")),
-    ];
+    let mut spans = vec![Span::styled(
+        format!(" {} ", app.account_hint),
+        Style::new().fg(Color::Black).bg(Color::Cyan),
+    )];
+    if !app.filter.trim().is_empty() {
+        let escape = if matches!(app.mode, Mode::Filter(_)) {
+            "cancel"
+        } else {
+            "clear"
+        };
+        let matches = app
+            .columns
+            .iter()
+            .flat_map(|c| &c.rows)
+            .filter(|r| !r.ghost)
+            .count();
+        spans.push(Span::styled(
+            format!(
+                " filter: {} ({matches}) | Esc: {escape} │",
+                super::fit(app.filter.trim(), 24).trim_end()
+            ),
+            Style::new().fg(Color::Cyan),
+        ));
+    }
+    spans.push(Span::raw(format!(" {refreshed} │ {done} │ {sort}")));
     let pending = app.pending_count();
     if pending > 0 {
         spans.push(Span::styled(
@@ -45,7 +63,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw(" │ "));
         spans.push(Span::styled(msg.text.clone(), style));
     } else {
-        spans.push(Span::raw(" │ s: sort  ?: help  q: quit").dim());
+        spans.push(Span::raw(" │ f: filter  s: sort  ?: help  q: quit").dim());
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
