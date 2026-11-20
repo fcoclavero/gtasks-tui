@@ -773,6 +773,12 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.focus_by(-1),
             KeyCode::Right | KeyCode::Char('l') => self.focus_by(1),
             KeyCode::Char(number @ '1'..='9') => self.focus_column((number as u8 - b'1') as usize),
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_by(isize::MIN / 2)
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_by(isize::MAX / 2)
+            }
             KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
             KeyCode::PageUp => self.move_by(-10),
@@ -1394,6 +1400,12 @@ impl App {
             return;
         };
         match key.code {
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
+                state.move_by(isize::MIN / 2)
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+                state.move_by(isize::MAX / 2)
+            }
             KeyCode::Up | KeyCode::Char('k') => state.move_by(-1),
             KeyCode::Down | KeyCode::Char('j') => state.move_by(1),
             KeyCode::PageUp => state.move_by(-10),

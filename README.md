@@ -63,7 +63,7 @@ Press `f` to filter tasks across all lists by title or notes. Matches update as 
 | `↑` `↓` `j` `k` | Move between tasks and subtasks |
 | Click / double-click | Select the clicked task (focusing its list) / open it in the editor |
 | Scroll wheel / trackpad | Scroll the list under the pointer without changing focus. The selection stays put until it would leave the screen, then moves with it. |
-| `g` `G` | First / last task |
+| `Alt+↑` `Alt+↓` / `g` `G` | First / last task |
 | `Space` | Toggle done. The task stays visible until you move away, so you can undo. |
 | `Enter` | Edit title, due date, and notes. Links are shown read-only. |
 | `c` | Show / hide completed tasks |
